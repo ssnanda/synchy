@@ -266,6 +266,11 @@
 	color: #426067;
 }
 
+.synchy-text-break {
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
 .synchy-downloads {
 	display: flex;
 	flex-wrap: wrap;

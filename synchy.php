@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.2
+ * Version: 0.7.3
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.2';
+const SYNCHY_VERSION = '0.7.3';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -21,6 +21,7 @@ const SYNCHY_SITE_SYNC_OPTIONS = 'synchy_site_sync_options';
 const SYNCHY_SITE_SYNC_JOB_OPTION = 'synchy_site_sync_job';
 const SYNCHY_SYNC_LAST_TIME_OPTION = 'syncy_last_sync_time';
 const SYNCHY_SYNC_STATUS_OPTION = 'synchy_sync_status';
+const SYNCHY_IMPORT_RESULT_OPTION = 'synchy_import_result';
 const SYNCHY_NOTICE_PREFIX = 'synchy_admin_notice_';
 
 if (!defined('SYNCHY_GITHUB_REPOSITORY')) {
@@ -619,6 +620,18 @@ function synchy_get_sync_status(): array
 function synchy_set_sync_status(array $status): void
 {
 	update_option(SYNCHY_SYNC_STATUS_OPTION, $status, false);
+}
+
+function synchy_get_import_result(): array
+{
+	$value = get_option(SYNCHY_IMPORT_RESULT_OPTION, []);
+
+	return is_array($value) ? $value : [];
+}
+
+function synchy_set_import_result(array $result): void
+{
+	update_option(SYNCHY_IMPORT_RESULT_OPTION, $result, false);
 }
 
 function synchy_get_sync_storage_root(): string
@@ -3494,6 +3507,335 @@ function synchy_get_remote_push_root_path(): string
 	return wp_normalize_path(trailingslashit((string) $uploads['basedir']) . 'synchy-site-sync');
 }
 
+function synchy_get_manual_import_root_path(): string
+{
+	$uploads = wp_upload_dir();
+
+	if (!empty($uploads['error']) || empty($uploads['basedir'])) {
+		return '';
+	}
+
+	return wp_normalize_path(trailingslashit((string) $uploads['basedir']) . 'synchy-import');
+}
+
+function synchy_validate_manual_import_upload(array $file, string $expected_extension)
+{
+	$error = (int) ($file['error'] ?? UPLOAD_ERR_NO_FILE);
+
+	if ($error !== UPLOAD_ERR_OK) {
+		$message = match ($error) {
+			UPLOAD_ERR_NO_FILE => sprintf(
+				/* translators: %s: expected file extension */
+				__('Select the .%s file before continuing.', 'synchy'),
+				$expected_extension
+			),
+			UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE => sprintf(
+				/* translators: %s: expected file extension */
+				__('The uploaded .%s file exceeds the server upload limit.', 'synchy'),
+				$expected_extension
+			),
+			UPLOAD_ERR_PARTIAL => sprintf(
+				/* translators: %s: expected file extension */
+				__('The uploaded .%s file was only partially received. Upload it again.', 'synchy'),
+				$expected_extension
+			),
+			default => __('Synchy could not read one of the uploaded import files.', 'synchy'),
+		};
+
+		return new WP_Error('synchy_import_upload_error', $message);
+	}
+
+	$tmp_name = isset($file['tmp_name']) ? (string) $file['tmp_name'] : '';
+	$name = sanitize_file_name((string) ($file['name'] ?? ''));
+
+	if ($tmp_name === '' || !is_uploaded_file($tmp_name) || $name === '') {
+		return new WP_Error('synchy_import_upload_missing', __('Synchy could not validate the uploaded import file.', 'synchy'));
+	}
+
+	if (strtolower((string) pathinfo($name, PATHINFO_EXTENSION)) !== strtolower($expected_extension)) {
+		return new WP_Error(
+			'synchy_import_upload_extension',
+			sprintf(
+				/* translators: %s: expected file extension */
+				__('Upload a valid .%s file for this import field.', 'synchy'),
+				$expected_extension
+			)
+		);
+	}
+
+	return [
+		'tmp_name' => $tmp_name,
+		'name' => $name,
+	];
+}
+
+function synchy_stage_manual_import_upload(array $file, string $destination_path)
+{
+	$directory = dirname($destination_path);
+
+	if (!wp_mkdir_p($directory)) {
+		return new WP_Error('synchy_import_stage_dir_failed', __('Synchy could not create the manual import staging folder.', 'synchy'));
+	}
+
+	if (!move_uploaded_file((string) $file['tmp_name'], $destination_path)) {
+		return new WP_Error('synchy_import_stage_move_failed', __('Synchy could not move the uploaded import file into the staging folder.', 'synchy'));
+	}
+
+	return [
+		'path' => wp_normalize_path($destination_path),
+		'filename' => basename($destination_path),
+		'bytes' => (int) filesize($destination_path),
+	];
+}
+
+function synchy_handle_manual_import_upload()
+{
+	$root = synchy_get_manual_import_root_path();
+
+	if ($root === '') {
+		return new WP_Error('synchy_import_root_missing', __('Synchy could not resolve the import staging folder inside uploads.', 'synchy'));
+	}
+
+	$archive_file = $_FILES['synchy_import_archive'] ?? null;
+	$installer_file = $_FILES['synchy_import_installer'] ?? null;
+
+	if (!is_array($archive_file) || !is_array($installer_file)) {
+		return new WP_Error('synchy_import_files_missing', __('Upload both the package zip and installer.php before continuing.', 'synchy'));
+	}
+
+	$validated_archive = synchy_validate_manual_import_upload($archive_file, 'zip');
+
+	if (is_wp_error($validated_archive)) {
+		return $validated_archive;
+	}
+
+	$validated_installer = synchy_validate_manual_import_upload($installer_file, 'php');
+
+	if (is_wp_error($validated_installer)) {
+		return $validated_installer;
+	}
+
+	$session_id = wp_generate_uuid4();
+	$session_dir = wp_normalize_path(trailingslashit($root) . $session_id);
+	$archive_destination = wp_normalize_path(trailingslashit($session_dir) . $validated_archive['name']);
+	$installer_destination = wp_normalize_path(trailingslashit($session_dir) . $validated_installer['name']);
+
+	$staged_archive = synchy_stage_manual_import_upload($validated_archive, $archive_destination);
+
+	if (is_wp_error($staged_archive)) {
+		return $staged_archive;
+	}
+
+	$staged_installer = synchy_stage_manual_import_upload($validated_installer, $installer_destination);
+
+	if (is_wp_error($staged_installer)) {
+		if (is_dir($session_dir)) {
+			synchy_rrmdir($session_dir);
+		}
+
+		return $staged_installer;
+	}
+
+	$session = [
+		'session_id' => $session_id,
+		'directory' => $session_dir,
+		'artifacts' => [
+			'archive' => [
+				'path' => (string) $staged_archive['path'],
+				'filename' => (string) $staged_archive['filename'],
+			],
+			'installer' => [
+				'path' => (string) $staged_installer['path'],
+				'filename' => (string) $staged_installer['filename'],
+			],
+		],
+	];
+
+	$deploy = synchy_deploy_remote_push_package_to_root($session);
+	$deploy['sessionId'] = $session_id;
+	$deploy['stagingPath'] = $session_dir;
+	$deploy['stagedArchivePath'] = (string) $staged_archive['path'];
+	$deploy['stagedInstallerPath'] = (string) $staged_installer['path'];
+	$deploy['archiveFilename'] = (string) $staged_archive['filename'];
+	$deploy['installerFilename'] = (string) $staged_installer['filename'];
+
+	return $deploy;
+}
+
+function synchy_render_import_page(array $current): void
+{
+	$result = synchy_get_import_result();
+	$root_path = synchy_get_site_root_path();
+	$root_writable = is_dir($root_path) && is_writable($root_path);
+	$staging_root = synchy_get_manual_import_root_path();
+	$upload_limit = size_format((int) wp_max_upload_size(), 2);
+	$status = (string) ($result['status'] ?? '');
+	$badge = __('Awaiting files', 'synchy');
+	$message = __('Upload the Synchy zip and its matching installer PHP file from the same export. Synchy will stage them and try to place them into this WordPress root.', 'synchy');
+
+	if ($status === 'ready') {
+		$badge = __('Root ready', 'synchy');
+		$message = (string) ($result['message'] ?? __('Synchy placed the uploaded files into the WordPress root.', 'synchy'));
+	} elseif ($status === 'staged_only') {
+		$badge = __('Staged only', 'synchy');
+		$message = (string) ($result['message'] ?? __('Synchy uploaded the files, but you still need to move them into the WordPress root manually.', 'synchy'));
+	} elseif ($status === 'error') {
+		$badge = __('Error', 'synchy');
+		$message = (string) ($result['message'] ?? __('Synchy could not process the uploaded import files.', 'synchy'));
+	}
+	?>
+	<div class="wrap synchy-admin">
+		<?php synchy_render_notice(); ?>
+		<div class="synchy-shell">
+			<div class="synchy-hero">
+				<div>
+					<p class="synchy-eyebrow"><?php esc_html_e('Destination Restore Setup', 'synchy'); ?></p>
+					<h1><?php echo esc_html($current['headline']); ?></h1>
+					<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
+				</div>
+				<div class="synchy-status">
+					<span class="synchy-status__dot" aria-hidden="true"></span>
+					<?php echo esc_html($root_writable ? __('Root writable', 'synchy') : __('Staging only', 'synchy')); ?>
+				</div>
+			</div>
+
+			<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" enctype="multipart/form-data" class="synchy-form">
+				<?php wp_nonce_field('synchy_stage_import_package'); ?>
+				<input type="hidden" name="action" value="synchy_stage_import_package" />
+
+				<div class="synchy-grid synchy-grid--export">
+					<div class="synchy-panel">
+						<h2><?php esc_html_e('What Import Does', 'synchy'); ?></h2>
+						<ul class="synchy-checklist synchy-checklist--detail">
+							<li>
+								<strong><?php esc_html_e('Uploads the package on the destination site', 'synchy'); ?></strong>
+								<span><?php esc_html_e('Choose the Synchy export zip and the matching installer PHP file from the same package.', 'synchy'); ?></span>
+							</li>
+							<li>
+								<strong><?php esc_html_e('Stages the uploaded files safely first', 'synchy'); ?></strong>
+								<span><?php esc_html_e('Synchy stores the uploaded files in wp-content/uploads/synchy-import before trying any root deployment.', 'synchy'); ?></span>
+							</li>
+							<li>
+								<strong><?php esc_html_e('Places the files in the WordPress root when possible', 'synchy'); ?></strong>
+								<span><?php esc_html_e('If the root is writable, Synchy copies the zip and writes installer.php into the site root automatically.', 'synchy'); ?></span>
+							</li>
+							<li>
+								<strong><?php esc_html_e('Leaves restore execution to installer.php', 'synchy'); ?></strong>
+								<span><?php esc_html_e('This screen does not run the restore. Its job is to place the package in the right location so you can launch installer.php.', 'synchy'); ?></span>
+							</li>
+						</ul>
+					</div>
+
+					<div class="synchy-panel synchy-panel--muted">
+						<h2><?php esc_html_e('Upload Package Files', 'synchy'); ?></h2>
+						<div class="synchy-field">
+							<label class="synchy-label" for="synchy-import-archive"><?php esc_html_e('Package Zip', 'synchy'); ?></label>
+							<input id="synchy-import-archive" type="file" name="synchy_import_archive" accept=".zip,application/zip" required />
+							<p class="synchy-field-note">
+								<?php esc_html_e('Choose the Synchy export archive. Large uploads depend on the PHP upload limit configured on this site.', 'synchy'); ?>
+							</p>
+						</div>
+
+						<div class="synchy-field">
+							<label class="synchy-label" for="synchy-import-installer"><?php esc_html_e('Installer PHP', 'synchy'); ?></label>
+							<input id="synchy-import-installer" type="file" name="synchy_import_installer" accept=".php,application/x-httpd-php,text/x-php" required />
+							<p class="synchy-field-note">
+								<?php esc_html_e('Choose the matching installer PHP file from the same Synchy export.', 'synchy'); ?>
+							</p>
+						</div>
+
+						<div class="synchy-export-meta">
+							<div>
+								<span class="synchy-export-meta__label"><?php esc_html_e('WordPress Root', 'synchy'); ?></span>
+								<strong class="synchy-text-break"><?php echo esc_html($root_path); ?></strong>
+							</div>
+							<div>
+								<span class="synchy-export-meta__label"><?php esc_html_e('Root Access', 'synchy'); ?></span>
+								<strong><?php echo esc_html($root_writable ? __('Writable', 'synchy') : __('Not writable', 'synchy')); ?></strong>
+							</div>
+							<div>
+								<span class="synchy-export-meta__label"><?php esc_html_e('Upload Limit', 'synchy'); ?></span>
+								<strong><?php echo esc_html($upload_limit); ?></strong>
+							</div>
+							<div>
+								<span class="synchy-export-meta__label"><?php esc_html_e('Import Staging Folder', 'synchy'); ?></span>
+								<strong class="synchy-text-break"><?php echo esc_html($staging_root !== '' ? $staging_root : __('Unavailable', 'synchy')); ?></strong>
+							</div>
+						</div>
+
+						<div class="synchy-run-export">
+							<button type="submit" class="button button-primary button-large"><?php esc_html_e('Upload and Place in Root', 'synchy'); ?></button>
+						</div>
+					</div>
+				</div>
+
+				<div class="synchy-panel synchy-panel--wide">
+					<div class="synchy-stack synchy-stack--compact">
+						<div class="synchy-stack__split">
+							<h2><?php esc_html_e('Latest Import Result', 'synchy'); ?></h2>
+							<span class="synchy-badge"><?php echo esc_html($badge); ?></span>
+						</div>
+						<p class="synchy-field-note"><?php echo esc_html($message); ?></p>
+						<div class="synchy-export-meta">
+							<div>
+								<span class="synchy-export-meta__label"><?php esc_html_e('Root Deploy Status', 'synchy'); ?></span>
+								<strong><?php echo esc_html($status !== '' ? $status : __('Waiting for upload', 'synchy')); ?></strong>
+							</div>
+							<div>
+								<span class="synchy-export-meta__label"><?php esc_html_e('Session', 'synchy'); ?></span>
+								<strong class="synchy-text-break"><?php echo esc_html((string) ($result['sessionId'] ?? __('Not created yet', 'synchy'))); ?></strong>
+							</div>
+							<div>
+								<span class="synchy-export-meta__label"><?php esc_html_e('Root Archive Path', 'synchy'); ?></span>
+								<strong class="synchy-text-break"><?php echo esc_html((string) ($result['archivePath'] ?? __('Not placed yet', 'synchy'))); ?></strong>
+							</div>
+							<div>
+								<span class="synchy-export-meta__label"><?php esc_html_e('Root Installer Path', 'synchy'); ?></span>
+								<strong class="synchy-text-break"><?php echo esc_html((string) ($result['installerPath'] ?? __('Not placed yet', 'synchy'))); ?></strong>
+							</div>
+							<div>
+								<span class="synchy-export-meta__label"><?php esc_html_e('Staging Folder', 'synchy'); ?></span>
+								<strong class="synchy-text-break"><?php echo esc_html((string) ($result['stagingPath'] ?? __('No upload staged yet', 'synchy'))); ?></strong>
+							</div>
+							<div>
+								<span class="synchy-export-meta__label"><?php esc_html_e('Installer URL', 'synchy'); ?></span>
+								<strong class="synchy-text-break">
+									<?php if (!empty($result['installerUrl'])) : ?>
+										<a href="<?php echo esc_url((string) $result['installerUrl']); ?>" target="_blank" rel="noreferrer noopener"><?php echo esc_html((string) $result['installerUrl']); ?></a>
+									<?php else : ?>
+										<?php esc_html_e('Available after root placement succeeds', 'synchy'); ?>
+									<?php endif; ?>
+								</strong>
+							</div>
+						</div>
+					</div>
+				</div>
+
+				<div class="synchy-grid synchy-grid--export">
+					<div class="synchy-panel">
+						<h2><?php esc_html_e('Requirements', 'synchy'); ?></h2>
+						<ul class="synchy-checklist">
+							<li><?php esc_html_e('Upload the zip and installer from the same Synchy export package.', 'synchy'); ?></li>
+							<li><?php esc_html_e('This site must have enough PHP upload/post size to receive the archive in one browser upload.', 'synchy'); ?></li>
+							<li><?php esc_html_e('If the WordPress root is not writable, Synchy will leave the files in the import staging folder and you will need to move them manually.', 'synchy'); ?></li>
+						</ul>
+					</div>
+
+					<div class="synchy-panel synchy-panel--muted">
+						<h2><?php esc_html_e('Next Step After Placement', 'synchy'); ?></h2>
+						<ul class="synchy-checklist">
+							<li><?php esc_html_e('Open installer.php in the site root.', 'synchy'); ?></li>
+							<li><?php esc_html_e('Provide the destination URL and database connection details.', 'synchy'); ?></li>
+							<li><?php esc_html_e('Run the restore to overwrite the destination database and files.', 'synchy'); ?></li>
+						</ul>
+					</div>
+				</div>
+			</form>
+		</div>
+	</div>
+	<?php
+}
+
 function synchy_sanitize_remote_push_session_id(string $session_id): string
 {
 	return (string) preg_replace('/[^a-z0-9-]/i', '', $session_id);
@@ -4905,6 +5247,11 @@ function synchy_render_page(string $page_slug): void
 		return;
 	}
 
+	if ($page_slug === 'synchy-import') {
+		synchy_render_import_page($current);
+		return;
+	}
+
 	if ($page_slug === 'synchy-push-live-site') {
 		synchy_render_site_sync_page($current);
 		return;
@@ -5206,6 +5553,37 @@ add_action('admin_post_synchy_download_export', function (): void {
 	header('Content-Disposition: attachment; filename="' . $filename . '"');
 
 	readfile($file_path);
+	exit;
+});
+
+add_action('admin_post_synchy_stage_import_package', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_die(esc_html__('You are not allowed to stage Synchy import packages.', 'synchy'));
+	}
+
+	check_admin_referer('synchy_stage_import_package');
+
+	$result = synchy_handle_manual_import_upload();
+
+	if (is_wp_error($result)) {
+		synchy_set_import_result([
+			'status' => 'error',
+			'message' => $result->get_error_message(),
+			'rootPath' => synchy_get_site_root_path(),
+			'at' => gmdate('c'),
+		]);
+		synchy_set_notice('error', $result->get_error_message());
+		wp_safe_redirect(admin_url('admin.php?page=synchy-import'));
+		exit;
+	}
+
+	$result['at'] = gmdate('c');
+	synchy_set_import_result($result);
+
+	$notice_type = (string) ($result['status'] ?? '') === 'ready' ? 'success' : 'error';
+	synchy_set_notice($notice_type, (string) ($result['message'] ?? __('Synchy processed the uploaded import package.', 'synchy')));
+
+	wp_safe_redirect(admin_url('admin.php?page=synchy-import'));
 	exit;
 });
 
