@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.6.8
+ * Version: 0.7.0
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,13 +12,15 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.6.8';
+const SYNCHY_VERSION = '0.7.0';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
 const SYNCHY_EXPORT_JOB_OPTION = 'synchy_export_job';
 const SYNCHY_SITE_SYNC_OPTIONS = 'synchy_site_sync_options';
 const SYNCHY_SITE_SYNC_JOB_OPTION = 'synchy_site_sync_job';
+const SYNCHY_SYNC_LAST_TIME_OPTION = 'syncy_last_sync_time';
+const SYNCHY_SYNC_STATUS_OPTION = 'synchy_sync_status';
 const SYNCHY_NOTICE_PREFIX = 'synchy_admin_notice_';
 
 if (!defined('SYNCHY_GITHUB_REPOSITORY')) {
@@ -351,13 +353,13 @@ function synchy_get_pages(): array
 			'headline' => __('Upload to Live', 'synchy'),
 			'description' => __('Upload a full Synchy backup package to another WordPress site and launch the manual restore there.', 'synchy'),
 		],
-		[
-			'slug' => 'synchy-site-sync',
-			'title' => __('Sync', 'synchy'),
-			'menu_title' => __('Sync', 'synchy'),
-			'headline' => __('Sync', 'synchy'),
-			'description' => __('Work toward incremental post-push changes without another full backup and restore cycle.', 'synchy'),
-		],
+			[
+				'slug' => 'synchy-site-sync',
+				'title' => __('Sync', 'synchy'),
+				'menu_title' => __('Sync', 'synchy'),
+				'headline' => __('Sync', 'synchy'),
+				'description' => __('Sync only changed files and selected database deltas after the first baseline.', 'synchy'),
+			],
 		[
 			'slug' => 'synchy-settings',
 			'title' => __('About', 'synchy'),
@@ -597,6 +599,821 @@ function synchy_get_site_sync_password_hint(array $options): string
 	);
 }
 
+function synchy_get_sync_last_time(): int
+{
+	return max(0, (int) get_option(SYNCHY_SYNC_LAST_TIME_OPTION, 0));
+}
+
+function synchy_set_sync_last_time(int $timestamp): void
+{
+	update_option(SYNCHY_SYNC_LAST_TIME_OPTION, max(0, $timestamp), false);
+}
+
+function synchy_get_sync_status(): array
+{
+	$value = get_option(SYNCHY_SYNC_STATUS_OPTION, []);
+
+	return is_array($value) ? $value : [];
+}
+
+function synchy_set_sync_status(array $status): void
+{
+	update_option(SYNCHY_SYNC_STATUS_OPTION, $status, false);
+}
+
+function synchy_get_sync_storage_root(): string
+{
+	$uploads = wp_upload_dir();
+
+	if (!empty($uploads['error']) || empty($uploads['basedir'])) {
+		return '';
+	}
+
+	return wp_normalize_path(trailingslashit((string) $uploads['basedir']) . 'synchy-sync');
+}
+
+function synchy_get_sync_state_path(): string
+{
+	$root = synchy_get_sync_storage_root();
+
+	return $root === '' ? '' : wp_normalize_path(trailingslashit($root) . 'sync-state.json');
+}
+
+function synchy_get_sync_temp_root(): string
+{
+	$root = synchy_get_sync_storage_root();
+
+	return $root === '' ? '' : wp_normalize_path(trailingslashit($root) . 'tmp');
+}
+
+function synchy_get_sync_state(): array
+{
+	$path = synchy_get_sync_state_path();
+
+	if ($path === '' || !is_readable($path)) {
+		return [
+			'last_sync_time' => synchy_get_sync_last_time(),
+			'db_fingerprints' => [],
+		];
+	}
+
+	$decoded = json_decode((string) file_get_contents($path), true);
+
+	if (!is_array($decoded)) {
+		return [
+			'last_sync_time' => synchy_get_sync_last_time(),
+			'db_fingerprints' => [],
+		];
+	}
+
+	$decoded['last_sync_time'] = max(0, (int) ($decoded['last_sync_time'] ?? synchy_get_sync_last_time()));
+	$decoded['db_fingerprints'] = isset($decoded['db_fingerprints']) && is_array($decoded['db_fingerprints'])
+		? $decoded['db_fingerprints']
+		: [];
+
+	return $decoded;
+}
+
+function synchy_write_sync_state(array $state)
+{
+	$root = synchy_get_sync_storage_root();
+	$path = synchy_get_sync_state_path();
+
+	if ($root === '' || $path === '') {
+		return new WP_Error('synchy_sync_state_root_missing', __('Synchy could not resolve the sync state storage folder.', 'synchy'));
+	}
+
+	if (!wp_mkdir_p($root)) {
+		return new WP_Error('synchy_sync_state_root_failed', __('Synchy could not create the sync state storage folder.', 'synchy'));
+	}
+
+	$json = wp_json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+
+	if ($json === false || file_put_contents($path, $json) === false) {
+		return new WP_Error('synchy_sync_state_write_failed', __('Synchy could not write the sync state file.', 'synchy'));
+	}
+
+	return true;
+}
+
+function synchy_prepare_sync_temp_dir(string $suffix = '') 
+{
+	$root = synchy_get_sync_temp_root();
+
+	if ($root === '') {
+		return new WP_Error('synchy_sync_temp_root_missing', __('Synchy could not resolve the temporary sync workspace.', 'synchy'));
+	}
+
+	if (!wp_mkdir_p($root)) {
+		return new WP_Error('synchy_sync_temp_root_failed', __('Synchy could not create the temporary sync workspace.', 'synchy'));
+	}
+
+	$dir = wp_normalize_path(
+		trailingslashit($root)
+		. gmdate('Ymd-His')
+		. '-'
+		. strtolower(wp_generate_password(6, false, false))
+		. ($suffix !== '' ? '-' . sanitize_title($suffix) : '')
+	);
+
+	if (!wp_mkdir_p($dir)) {
+		return new WP_Error('synchy_sync_temp_dir_failed', __('Synchy could not create the working sync folder.', 'synchy'));
+	}
+
+	return $dir;
+}
+
+function synchy_get_sync_active_theme_slugs(): array
+{
+	$slugs = [];
+	$stylesheet = get_stylesheet();
+	$template = get_template();
+
+	if ($stylesheet !== '') {
+		$slugs[] = $stylesheet;
+	}
+
+	if ($template !== '' && !in_array($template, $slugs, true)) {
+		$slugs[] = $template;
+	}
+
+	return array_values(array_filter($slugs));
+}
+
+function synchy_get_sync_file_targets(): array
+{
+	$targets = [];
+	$plugins_dir = wp_normalize_path(WP_CONTENT_DIR . '/plugins');
+
+	if (is_dir($plugins_dir)) {
+		$targets[] = [
+			'path' => $plugins_dir,
+			'archive_prefix' => 'plugins',
+		];
+	}
+
+	foreach (synchy_get_sync_active_theme_slugs() as $slug) {
+		$theme_dir = wp_normalize_path(WP_CONTENT_DIR . '/themes/' . $slug);
+
+		if (!is_dir($theme_dir)) {
+			continue;
+		}
+
+		$targets[] = [
+			'path' => $theme_dir,
+			'archive_prefix' => 'themes/' . $slug,
+		];
+	}
+
+	$uploads = wp_upload_dir();
+
+	if (empty($uploads['error']) && !empty($uploads['basedir']) && is_dir((string) $uploads['basedir'])) {
+		$targets[] = [
+			'path' => wp_normalize_path((string) $uploads['basedir']),
+			'archive_prefix' => 'uploads',
+		];
+	}
+
+	return $targets;
+}
+
+function synchy_is_sync_file_excluded(string $archive_path): bool
+{
+	$archive_path = ltrim(wp_normalize_path($archive_path), '/');
+
+	if ($archive_path === '') {
+		return true;
+	}
+
+	$excluded_exact = [
+		'.DS_Store',
+		'Thumbs.db',
+		'desktop.ini',
+	];
+
+	foreach ($excluded_exact as $exact) {
+		if (basename($archive_path) === $exact) {
+			return true;
+		}
+	}
+
+	$excluded_contains = [
+		'/.git/',
+		'/.github/',
+		'/.svn/',
+		'/.hg/',
+		'/node_modules/',
+		'/coverage/',
+		'/__MACOSX/',
+		'/uploads/synchy-backups/',
+		'/uploads/synchy-site-sync/',
+		'/uploads/synchy-sync/',
+	];
+
+	foreach ($excluded_contains as $needle) {
+		if (str_contains('/' . $archive_path, $needle)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+function synchy_collect_sync_file_delta(int $last_sync_time): array
+{
+	$baseline = $last_sync_time <= 0;
+	$files = [];
+	$total_bytes = 0;
+
+	foreach (synchy_get_sync_file_targets() as $target) {
+		$base_path = wp_normalize_path((string) $target['path']);
+		$archive_prefix = trim((string) $target['archive_prefix'], '/');
+		$iterator = new RecursiveIteratorIterator(
+			new RecursiveDirectoryIterator($base_path, FilesystemIterator::SKIP_DOTS),
+			RecursiveIteratorIterator::SELF_FIRST
+		);
+
+		foreach ($iterator as $item) {
+			if (!$item->isFile()) {
+				continue;
+			}
+
+			$absolute_path = wp_normalize_path($item->getPathname());
+			$relative_path = ltrim(substr($absolute_path, strlen($base_path)), '/');
+			$archive_path = $archive_prefix . '/' . $relative_path;
+
+			if (synchy_is_sync_file_excluded($archive_path)) {
+				continue;
+			}
+
+			$mtime = (int) $item->getMTime();
+
+			if (!$baseline && $mtime <= $last_sync_time) {
+				continue;
+			}
+
+			$size = (int) $item->getSize();
+
+			$files[] = [
+				'absolute_path' => $absolute_path,
+				'archive_path' => $archive_path,
+				'size' => $size,
+				'mtime' => $mtime,
+			];
+
+			$total_bytes += $size;
+		}
+	}
+
+	usort(
+		$files,
+		static fn(array $left, array $right): int => strcmp((string) $left['archive_path'], (string) $right['archive_path'])
+	);
+
+	return [
+		'mode' => $baseline ? 'baseline' : 'delta',
+		'files' => $files,
+		'count' => count($files),
+		'bytes' => $total_bytes,
+	];
+}
+
+function synchy_should_sync_option_name(string $option_name): bool
+{
+	if ($option_name === '') {
+		return false;
+	}
+
+	if (preg_match('/^(_site)?_transient(_timeout)?_/', $option_name)) {
+		return false;
+	}
+
+	$excluded = [
+		'cron',
+		'recently_edited',
+		SYNCHY_EXPORT_OPTIONS,
+		SYNCHY_LAST_EXPORT_OPTION,
+		SYNCHY_EXPORT_JOB_OPTION,
+		SYNCHY_SITE_SYNC_OPTIONS,
+		SYNCHY_SITE_SYNC_JOB_OPTION,
+		SYNCHY_SYNC_STATUS_OPTION,
+		SYNCHY_SYNC_LAST_TIME_OPTION,
+	];
+
+	if (in_array($option_name, $excluded, true)) {
+		return false;
+	}
+
+	if (str_starts_with($option_name, 'synchy_') || str_starts_with($option_name, 'syncy_')) {
+		return false;
+	}
+
+	return true;
+}
+
+function synchy_get_sync_row_key(array $row, array $key_columns): string
+{
+	$parts = [];
+
+	foreach ($key_columns as $column) {
+		$parts[] = isset($row[$column]) ? (string) $row[$column] : '';
+	}
+
+	return implode(':', $parts);
+}
+
+function synchy_hash_sync_row(array $row): string
+{
+	ksort($row);
+
+	return md5((string) wp_json_encode($row, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+}
+
+function synchy_build_sync_table_fingerprints(array $rows, array $key_columns): array
+{
+	$fingerprints = [];
+
+	foreach ($rows as $row) {
+		$key = synchy_get_sync_row_key($row, $key_columns);
+
+		if ($key === '') {
+			continue;
+		}
+
+		$fingerprints[$key] = synchy_hash_sync_row($row);
+	}
+
+	return $fingerprints;
+}
+
+function synchy_get_sync_table_specs(): array
+{
+	global $wpdb;
+
+	return [
+		$wpdb->posts => [
+			'key_columns' => ['ID'],
+		],
+		$wpdb->postmeta => [
+			'key_columns' => ['meta_id'],
+		],
+		$wpdb->options => [
+			'key_columns' => ['option_name'],
+			'select_columns' => ['option_name', 'option_value', 'autoload'],
+			'update_columns' => ['option_value', 'autoload'],
+		],
+		$wpdb->terms => [
+			'key_columns' => ['term_id'],
+		],
+		$wpdb->term_taxonomy => [
+			'key_columns' => ['term_taxonomy_id'],
+		],
+		$wpdb->term_relationships => [
+			'key_columns' => ['object_id', 'term_taxonomy_id'],
+			'update_columns' => ['term_order'],
+		],
+	];
+}
+
+function synchy_fetch_all_rows_from_table(string $table, array $columns = []): array
+{
+	global $wpdb;
+
+	$select = $columns === []
+		? '*'
+		: implode(', ', array_map(static fn(string $column): string => '`' . str_replace('`', '``', $column) . '`', $columns));
+
+	$rows = $wpdb->get_results('SELECT ' . $select . ' FROM `' . str_replace('`', '``', $table) . '`', ARRAY_A);
+
+	return is_array($rows) ? array_values($rows) : [];
+}
+
+function synchy_fetch_rows_by_ids(string $table, string $column, array $ids, array $columns = []): array
+{
+	global $wpdb;
+
+	if ($ids === []) {
+		return [];
+	}
+
+	$rows = [];
+	$select = $columns === []
+		? '*'
+		: implode(', ', array_map(static fn(string $name): string => '`' . str_replace('`', '``', $name) . '`', $columns));
+
+	foreach (array_chunk(array_values(array_unique($ids)), 250) as $chunk) {
+		$placeholders = implode(', ', array_fill(0, count($chunk), '%s'));
+		$sql = $wpdb->prepare(
+			'SELECT ' . $select . ' FROM `' . str_replace('`', '``', $table) . '` WHERE `' . str_replace('`', '``', $column) . '` IN (' . $placeholders . ')',
+			$chunk
+		);
+
+		$chunk_rows = $wpdb->get_results($sql, ARRAY_A);
+
+		if (is_array($chunk_rows)) {
+			$rows = array_merge($rows, array_values($chunk_rows));
+		}
+	}
+
+	return $rows;
+}
+
+function synchy_get_changed_post_ids_for_sync(int $last_sync_time): array
+{
+	global $wpdb;
+
+	if ($last_sync_time <= 0) {
+		$rows = $wpdb->get_col('SELECT `ID` FROM `' . str_replace('`', '``', $wpdb->posts) . '`');
+
+		return is_array($rows) ? array_values(array_map('intval', $rows)) : [];
+	}
+
+	$since = gmdate('Y-m-d H:i:s', $last_sync_time);
+	$sql = $wpdb->prepare(
+		'SELECT `ID` FROM `' . str_replace('`', '``', $wpdb->posts) . '` WHERE `post_modified_gmt` > %s OR `post_date_gmt` > %s',
+		$since,
+		$since
+	);
+	$rows = $wpdb->get_col($sql);
+
+	return is_array($rows) ? array_values(array_map('intval', $rows)) : [];
+}
+
+function synchy_build_sync_snapshot_delta(array $rows, array $previous_fingerprints, array $key_columns, bool $baseline): array
+{
+	$current = synchy_build_sync_table_fingerprints($rows, $key_columns);
+	$changed = [];
+
+	foreach ($rows as $row) {
+		$key = synchy_get_sync_row_key($row, $key_columns);
+
+		if ($key === '') {
+			continue;
+		}
+
+		if ($baseline || !isset($previous_fingerprints[$key]) || $previous_fingerprints[$key] !== ($current[$key] ?? '')) {
+			$changed[] = $row;
+		}
+	}
+
+	return [
+		'rows' => $changed,
+		'fingerprints' => $current,
+		'row_ids' => array_map(static fn(array $row): string => synchy_get_sync_row_key($row, $key_columns), $changed),
+	];
+}
+
+function synchy_get_sync_option_rows(): array
+{
+	global $wpdb;
+
+	$rows = $wpdb->get_results(
+		'SELECT `option_name`, `option_value`, `autoload` FROM `' . str_replace('`', '``', $wpdb->options) . '`',
+		ARRAY_A
+	);
+
+	if (!is_array($rows)) {
+		return [];
+	}
+
+	return array_values(
+		array_filter(
+			$rows,
+			static fn(array $row): bool => synchy_should_sync_option_name((string) ($row['option_name'] ?? ''))
+		)
+	);
+}
+
+function synchy_build_sync_database_delta(array $state): array
+{
+	global $wpdb;
+
+	$specs = synchy_get_sync_table_specs();
+	$last_sync_time = max(0, (int) ($state['last_sync_time'] ?? synchy_get_sync_last_time()));
+	$baseline = $last_sync_time <= 0;
+	$previous_fingerprints = isset($state['db_fingerprints']) && is_array($state['db_fingerprints']) ? $state['db_fingerprints'] : [];
+	$tables = [];
+	$current_fingerprints = [];
+	$total_rows = 0;
+
+	$post_ids = synchy_get_changed_post_ids_for_sync($last_sync_time);
+	$posts_rows = synchy_fetch_rows_by_ids($wpdb->posts, 'ID', $post_ids);
+
+	if ($posts_rows !== []) {
+		$tables[$wpdb->posts] = [
+			'key_columns' => $specs[$wpdb->posts]['key_columns'],
+			'rows' => $posts_rows,
+			'row_ids' => array_values(array_map(static fn(array $row): string => (string) ($row['ID'] ?? ''), $posts_rows)),
+			'update_columns' => [],
+		];
+		$total_rows += count($posts_rows);
+	}
+
+	$postmeta_rows = $post_ids === [] ? [] : synchy_fetch_rows_by_ids($wpdb->postmeta, 'post_id', $post_ids);
+
+	if ($postmeta_rows !== []) {
+		$tables[$wpdb->postmeta] = [
+			'key_columns' => $specs[$wpdb->postmeta]['key_columns'],
+			'rows' => $postmeta_rows,
+			'row_ids' => array_values(array_map(static fn(array $row): string => (string) ($row['meta_id'] ?? ''), $postmeta_rows)),
+			'update_columns' => [],
+		];
+		$total_rows += count($postmeta_rows);
+	}
+
+	$options_delta = synchy_build_sync_snapshot_delta(
+		synchy_get_sync_option_rows(),
+		isset($previous_fingerprints[$wpdb->options]) && is_array($previous_fingerprints[$wpdb->options]) ? $previous_fingerprints[$wpdb->options] : [],
+		$specs[$wpdb->options]['key_columns'],
+		$baseline
+	);
+	$current_fingerprints[$wpdb->options] = $options_delta['fingerprints'];
+
+	if ($options_delta['rows'] !== []) {
+		$tables[$wpdb->options] = [
+			'key_columns' => $specs[$wpdb->options]['key_columns'],
+			'rows' => $options_delta['rows'],
+			'row_ids' => $options_delta['row_ids'],
+			'update_columns' => $specs[$wpdb->options]['update_columns'],
+		];
+		$total_rows += count($options_delta['rows']);
+	}
+
+	foreach ([$wpdb->terms, $wpdb->term_taxonomy, $wpdb->term_relationships] as $table) {
+		$delta = synchy_build_sync_snapshot_delta(
+			synchy_fetch_all_rows_from_table($table),
+			isset($previous_fingerprints[$table]) && is_array($previous_fingerprints[$table]) ? $previous_fingerprints[$table] : [],
+			$specs[$table]['key_columns'],
+			$baseline
+		);
+
+		$current_fingerprints[$table] = $delta['fingerprints'];
+
+		if ($delta['rows'] === []) {
+			continue;
+		}
+
+		$tables[$table] = [
+			'key_columns' => $specs[$table]['key_columns'],
+			'rows' => $delta['rows'],
+			'row_ids' => $delta['row_ids'],
+			'update_columns' => $specs[$table]['update_columns'] ?? [],
+		];
+		$total_rows += count($delta['rows']);
+	}
+
+	$table_counts = [];
+
+	foreach ($tables as $table => $data) {
+		$table_counts[$table] = count((array) ($data['rows'] ?? []));
+	}
+
+	return [
+		'mode' => $baseline ? 'baseline' : 'delta',
+		'tables' => $tables,
+		'table_counts' => $table_counts,
+		'total_rows' => $total_rows,
+		'current_fingerprints' => $current_fingerprints,
+	];
+}
+
+function synchy_sync_sql_value($value): string
+{
+	if ($value === null) {
+		return 'NULL';
+	}
+
+	if (is_bool($value)) {
+		return $value ? '1' : '0';
+	}
+
+	if (is_int($value) || is_float($value)) {
+		return (string) $value;
+	}
+
+	return "'" . esc_sql((string) $value) . "'";
+}
+
+function synchy_build_sync_upsert_statements(string $table, array $rows, array $key_columns, array $update_columns = []): array
+{
+	if ($rows === []) {
+		return [];
+	}
+
+	$columns = array_keys(reset($rows));
+	$update_columns = $update_columns === [] ? array_values(array_diff($columns, $key_columns)) : $update_columns;
+	$statements = [];
+
+	foreach (array_chunk($rows, 100) as $chunk) {
+		$values_sql = [];
+
+		foreach ($chunk as $row) {
+			$ordered_values = [];
+
+			foreach ($columns as $column) {
+				$ordered_values[] = synchy_sync_sql_value($row[$column] ?? null);
+			}
+
+			$values_sql[] = '(' . implode(', ', $ordered_values) . ')';
+		}
+
+		$update_sql = [];
+
+		foreach ($update_columns as $column) {
+			$escaped = '`' . str_replace('`', '``', $column) . '`';
+			$update_sql[] = $escaped . ' = VALUES(' . $escaped . ')';
+		}
+
+		$statements[] = 'INSERT INTO `' . str_replace('`', '``', $table) . '` ('
+			. implode(', ', array_map(static fn(string $column): string => '`' . str_replace('`', '``', $column) . '`', $columns))
+			. ') VALUES ' . implode(",\n", $values_sql)
+			. ($update_sql !== [] ? ' ON DUPLICATE KEY UPDATE ' . implode(', ', $update_sql) : '')
+			. ';';
+	}
+
+	return $statements;
+}
+
+function synchy_write_sync_sql_file(array $tables, string $path)
+{
+	$sql = "-- Synchy Sync Delta\n";
+	$sql .= '-- Generated at ' . gmdate('c') . "\n\n";
+
+	foreach ($tables as $table => $data) {
+		$sql .= '-- Table: ' . $table . "\n";
+
+		foreach (
+			synchy_build_sync_upsert_statements(
+				$table,
+				(array) ($data['rows'] ?? []),
+				(array) ($data['key_columns'] ?? []),
+				(array) ($data['update_columns'] ?? [])
+			) as $statement
+		) {
+			$sql .= $statement . "\n\n";
+		}
+	}
+
+	if (file_put_contents($path, $sql) === false) {
+		return new WP_Error('synchy_sync_sql_write_failed', __('Synchy could not write the sync SQL file.', 'synchy'));
+	}
+
+	return true;
+}
+
+function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $sync_time, array $options): array
+{
+	global $wpdb;
+
+	$tables = [];
+
+	foreach ($db_delta['tables'] as $table => $data) {
+		$tables[$table] = [
+			'keyColumns' => array_values((array) ($data['key_columns'] ?? [])),
+			'updateColumns' => array_values((array) ($data['update_columns'] ?? [])),
+			'rowIds' => array_values((array) ($data['row_ids'] ?? [])),
+			'rowCount' => (int) count((array) ($data['rows'] ?? [])),
+			'rows' => array_values((array) ($data['rows'] ?? [])),
+		];
+	}
+
+	return [
+		'plugin' => 'Synchy',
+		'pluginVersion' => SYNCHY_VERSION,
+		'mode' => (string) ($db_delta['mode'] ?? $file_delta['mode'] ?? 'delta'),
+		'syncedAt' => $sync_time,
+		'source' => [
+			'homeUrl' => home_url('/'),
+			'siteUrl' => site_url('/'),
+			'absPath' => wp_normalize_path(ABSPATH),
+			'contentPath' => wp_normalize_path(WP_CONTENT_DIR),
+			'dbPrefix' => $wpdb->prefix,
+		],
+		'destination' => [
+			'url' => (string) ($options['destination_url'] ?? ''),
+		],
+		'files' => [
+			'count' => (int) ($file_delta['count'] ?? 0),
+			'bytes' => (int) ($file_delta['bytes'] ?? 0),
+			'paths' => array_values(array_map(static fn(array $file): string => (string) $file['archive_path'], (array) ($file_delta['files'] ?? []))),
+		],
+		'database' => [
+			'totalRows' => (int) ($db_delta['total_rows'] ?? 0),
+			'tableCounts' => (array) ($db_delta['table_counts'] ?? []),
+			'tables' => $tables,
+		],
+	];
+}
+
+function synchy_build_sync_package(array $options, bool $preview_only = false)
+{
+	$state = synchy_get_sync_state();
+	$last_sync_time = synchy_get_sync_last_time();
+	$state['last_sync_time'] = $last_sync_time;
+	$file_delta = synchy_collect_sync_file_delta($last_sync_time);
+	$db_delta = synchy_build_sync_database_delta($state);
+	$sync_time = time();
+	$manifest = synchy_build_sync_manifest($file_delta, $db_delta, $sync_time, $options);
+	$summary = [
+		'mode' => (string) ($manifest['mode'] ?? 'delta'),
+		'filesCount' => (int) ($manifest['files']['count'] ?? 0),
+		'filesBytes' => (int) ($manifest['files']['bytes'] ?? 0),
+		'filePaths' => array_slice((array) ($manifest['files']['paths'] ?? []), 0, 40),
+		'dbRows' => (int) ($manifest['database']['totalRows'] ?? 0),
+		'tableCounts' => (array) ($manifest['database']['tableCounts'] ?? []),
+		'lastSyncTime' => $last_sync_time,
+		'syncedAt' => $sync_time,
+	];
+
+	if ($preview_only) {
+		return [
+			'preview' => $summary,
+			'manifest' => $manifest,
+			'next_state' => [
+				'last_sync_time' => $sync_time,
+				'db_fingerprints' => (array) ($db_delta['current_fingerprints'] ?? []),
+			],
+		];
+	}
+
+	if ($summary['filesCount'] === 0 && $summary['dbRows'] === 0 && $summary['mode'] === 'delta') {
+		return [
+			'no_changes' => true,
+			'preview' => $summary,
+			'manifest' => $manifest,
+			'next_state' => [
+				'last_sync_time' => $sync_time,
+				'db_fingerprints' => (array) ($db_delta['current_fingerprints'] ?? []),
+			],
+		];
+	}
+
+	$temp_dir = synchy_prepare_sync_temp_dir($summary['mode']);
+
+	if (is_wp_error($temp_dir)) {
+		return $temp_dir;
+	}
+
+	$manifest_path = wp_normalize_path(trailingslashit($temp_dir) . 'manifest.json');
+	$sql_path = wp_normalize_path(trailingslashit($temp_dir) . 'delta.sql');
+	$zip_path = wp_normalize_path(trailingslashit($temp_dir) . 'sync-package.zip');
+	$manifest_json = wp_json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+
+	if ($manifest_json === false || file_put_contents($manifest_path, $manifest_json) === false) {
+		synchy_rrmdir($temp_dir);
+
+		return new WP_Error('synchy_sync_manifest_write_failed', __('Synchy could not write the sync manifest file.', 'synchy'));
+	}
+
+	$sql_written = synchy_write_sync_sql_file((array) ($db_delta['tables'] ?? []), $sql_path);
+
+	if (is_wp_error($sql_written)) {
+		synchy_rrmdir($temp_dir);
+
+		return $sql_written;
+	}
+
+	$zip = new ZipArchive();
+	$result = $zip->open($zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+
+	if ($result !== true) {
+		synchy_rrmdir($temp_dir);
+
+		return new WP_Error('synchy_sync_zip_open_failed', __('Synchy could not open the sync package for writing.', 'synchy'));
+	}
+
+	foreach ((array) ($file_delta['files'] ?? []) as $file) {
+		if (!$zip->addFile((string) $file['absolute_path'], (string) $file['archive_path'])) {
+			$zip->close();
+			synchy_rrmdir($temp_dir);
+
+			return new WP_Error(
+				'synchy_sync_zip_add_file_failed',
+				sprintf(
+					/* translators: %s: file path inside the archive */
+					__('Synchy could not add %s to the sync package.', 'synchy'),
+					(string) $file['archive_path']
+				)
+			);
+		}
+	}
+
+	$zip->addFile($sql_path, '.synchy-sync/db/delta.sql');
+	$zip->addFile($manifest_path, '.synchy-sync/db/manifest.json');
+	$zip->close();
+
+	return [
+		'preview' => $summary,
+		'manifest' => $manifest,
+		'next_state' => [
+			'last_sync_time' => $sync_time,
+			'db_fingerprints' => (array) ($db_delta['current_fingerprints'] ?? []),
+		],
+		'temp_dir' => $temp_dir,
+		'zip_path' => $zip_path,
+	];
+}
+
 function synchy_get_export_included_items(): array
 {
 	return [
@@ -703,19 +1520,19 @@ function synchy_render_notice(): void
 {
 	$notice = synchy_get_notice();
 
-	if ($notice === null) {
-		$page = isset($_GET['page']) ? sanitize_key(wp_unslash((string) $_GET['page'])) : '';
-		$settings_updated = isset($_GET['settings-updated']) ? sanitize_text_field(wp_unslash((string) $_GET['settings-updated'])) : '';
+		if ($notice === null) {
+			$page = isset($_GET['page']) ? sanitize_key(wp_unslash((string) $_GET['page'])) : '';
+			$settings_updated = isset($_GET['settings-updated']) ? sanitize_text_field(wp_unslash((string) $_GET['settings-updated'])) : '';
 
-		if ($page === 'synchy-push-live-site' && $settings_updated === 'true') {
-			$notice = [
-				'type' => 'success',
-				'message' => __('Upload destination settings saved.', 'synchy'),
-			];
-		} else {
-			return;
+			if (in_array($page, ['synchy-push-live-site', 'synchy-site-sync'], true) && $settings_updated === 'true') {
+				$notice = [
+					'type' => 'success',
+					'message' => __('Destination connection settings saved.', 'synchy'),
+				];
+			} else {
+				return;
+			}
 		}
-	}
 
 	$class = $notice['type'] === 'error' ? 'notice notice-error' : 'notice notice-success';
 	?>
@@ -1887,22 +2704,22 @@ function synchy_get_site_sync_export_options(array $site_sync_options): array
 function synchy_validate_site_sync_options(array $options)
 {
 	if ((string) ($options['destination_url'] ?? '') === '') {
-		return new WP_Error('synchy_site_sync_missing_url', __('Enter the destination WordPress URL before testing Upload to Live.', 'synchy'));
+		return new WP_Error('synchy_site_sync_missing_url', __('Enter the destination WordPress URL before continuing.', 'synchy'));
 	}
 
 	if ((string) ($options['destination_username'] ?? '') === '') {
-		return new WP_Error('synchy_site_sync_missing_username', __('Enter the destination username for Upload to Live.', 'synchy'));
+		return new WP_Error('synchy_site_sync_missing_username', __('Enter the destination username before continuing.', 'synchy'));
 	}
 
 	if ((string) ($options['destination_application_password'] ?? '') === '') {
-		return new WP_Error('synchy_site_sync_missing_password', __('Enter the destination application password for Upload to Live.', 'synchy'));
+		return new WP_Error('synchy_site_sync_missing_password', __('Enter the destination application password before continuing.', 'synchy'));
 	}
 
 	$current_home = untrailingslashit(home_url('/'));
 	$destination_home = untrailingslashit((string) $options['destination_url']);
 
 	if ($current_home !== '' && $destination_home !== '' && $current_home === $destination_home) {
-		return new WP_Error('synchy_site_sync_same_site', __('The destination URL matches this site. Choose a different WordPress site for Upload to Live.', 'synchy'));
+		return new WP_Error('synchy_site_sync_same_site', __('The destination URL matches this site. Choose a different WordPress site.', 'synchy'));
 	}
 
 	return true;
@@ -2000,6 +2817,670 @@ function synchy_test_site_sync_connection(array $options)
 	}
 
 	return $response;
+}
+
+function synchy_get_sync_remote_route_url(array $options): string
+{
+	return trailingslashit((string) $options['destination_url']) . 'wp-json/syncy/v1/sync';
+}
+
+function synchy_sync_remote_request(array $options, string $zip_path)
+{
+	$validation = synchy_validate_site_sync_options($options);
+
+	if (is_wp_error($validation)) {
+		return $validation;
+	}
+
+	if (!is_readable($zip_path)) {
+		return new WP_Error('synchy_sync_package_missing', __('Synchy could not read the generated sync package before upload.', 'synchy'));
+	}
+
+	$body = file_get_contents($zip_path);
+
+	if ($body === false || $body === '') {
+		return new WP_Error('synchy_sync_package_read_failed', __('Synchy could not read the sync package data before upload.', 'synchy'));
+	}
+
+	$response = wp_remote_post(
+		synchy_get_sync_remote_route_url($options),
+		[
+			'timeout' => 600,
+			'sslverify' => !empty($options['verify_ssl']),
+			'headers' => [
+				'Authorization' => 'Basic ' . base64_encode(
+					(string) $options['destination_username'] . ':' . (string) $options['destination_application_password']
+				),
+				'Content-Type' => 'application/zip',
+				'Accept' => 'application/json',
+				'X-Syncy-Filename' => basename($zip_path),
+			],
+			'body' => $body,
+			'data_format' => 'body',
+		]
+	);
+
+	if (is_wp_error($response)) {
+		return new WP_Error(
+			'synchy_sync_remote_request_failed',
+			sprintf(
+				/* translators: 1: remote URL, 2: error message */
+				__('Synchy could not reach %1$s. %2$s', 'synchy'),
+				synchy_get_sync_remote_route_url($options),
+				$response->get_error_message()
+			)
+		);
+	}
+
+	$code = (int) wp_remote_retrieve_response_code($response);
+	$body = (string) wp_remote_retrieve_body($response);
+	$data = json_decode($body, true);
+
+	if ($code < 200 || $code >= 300 || !is_array($data)) {
+		$message = is_array($data) && !empty($data['message'])
+			? (string) $data['message']
+			: sprintf(__('Destination site returned HTTP %d during Sync.', 'synchy'), $code);
+
+		return new WP_Error('synchy_sync_remote_http_error', $message);
+	}
+
+	if (!empty($data['success']) || !array_key_exists('success', $data)) {
+		return isset($data['data']) && is_array($data['data']) ? $data['data'] : $data;
+	}
+
+	$message = isset($data['message']) ? (string) $data['message'] : __('The destination site rejected the Sync request.', 'synchy');
+
+	return new WP_Error('synchy_sync_remote_rejected', $message);
+}
+
+function synchy_sync_apply_replacements($value, array $replacements, bool &$changed)
+{
+	if (is_string($value)) {
+		if (function_exists('is_serialized') && is_serialized($value)) {
+			$decoded = maybe_unserialize($value);
+			$updated = synchy_sync_apply_replacements($decoded, $replacements, $changed);
+
+			return maybe_serialize($updated);
+		}
+
+		$updated = $value;
+
+		foreach ($replacements as $search => $replace) {
+			$updated = str_replace($search, $replace, $updated);
+		}
+
+		if ($updated !== $value) {
+			$changed = true;
+		}
+
+		return $updated;
+	}
+
+	if (is_array($value)) {
+		foreach ($value as $key => $item) {
+			$value[$key] = synchy_sync_apply_replacements($item, $replacements, $changed);
+		}
+
+		return $value;
+	}
+
+	if (is_object($value)) {
+		foreach (get_object_vars($value) as $key => $item) {
+			$value->$key = synchy_sync_apply_replacements($item, $replacements, $changed);
+		}
+
+		return $value;
+	}
+
+	return $value;
+}
+
+function synchy_get_sync_replacements(array $manifest): array
+{
+	$source = isset($manifest['source']) && is_array($manifest['source']) ? $manifest['source'] : [];
+	$target_home = untrailingslashit(home_url('/'));
+	$target_site = untrailingslashit(site_url('/'));
+	$target_abs = wp_normalize_path(ABSPATH);
+	$target_content = wp_normalize_path(WP_CONTENT_DIR);
+	$replacements = [];
+
+	$pairs = [
+		[(string) ($source['siteUrl'] ?? ''), $target_site],
+		[(string) ($source['homeUrl'] ?? ''), $target_home],
+		[(string) ($source['contentPath'] ?? ''), $target_content],
+		[(string) ($source['absPath'] ?? ''), $target_abs],
+	];
+
+	foreach ($pairs as $pair) {
+		$search = (string) $pair[0];
+		$replace = (string) $pair[1];
+
+		if ($search === '' || $replace === '' || $search === $replace) {
+			continue;
+		}
+
+		$replacements[$search] = $replace;
+		$trimmed_search = untrailingslashit($search);
+		$trimmed_replace = untrailingslashit($replace);
+
+		if ($trimmed_search !== '' && $trimmed_search !== $search && !isset($replacements[$trimmed_search])) {
+			$replacements[$trimmed_search] = $trimmed_replace;
+		}
+	}
+
+	uksort(
+		$replacements,
+		static fn(string $left, string $right): int => strlen($right) <=> strlen($left)
+	);
+
+	return $replacements;
+}
+
+function synchy_build_sync_sql_from_manifest(array $manifest, string $sql_path)
+{
+	$database = isset($manifest['database']) && is_array($manifest['database']) ? $manifest['database'] : [];
+	$tables = isset($database['tables']) && is_array($database['tables']) ? $database['tables'] : [];
+	$replacements = synchy_get_sync_replacements($manifest);
+	$prepared_tables = [];
+
+	foreach ($tables as $table => $data) {
+		if (!is_array($data)) {
+			continue;
+		}
+
+		$rows = isset($data['rows']) && is_array($data['rows']) ? $data['rows'] : [];
+		$prepared_rows = [];
+
+		foreach ($rows as $row) {
+			if (!is_array($row)) {
+				continue;
+			}
+
+			$changed = false;
+			$prepared_rows[] = synchy_sync_apply_replacements($row, $replacements, $changed);
+		}
+
+		$prepared_tables[$table] = [
+			'rows' => $prepared_rows,
+			'key_columns' => array_values((array) ($data['keyColumns'] ?? [])),
+			'update_columns' => array_values((array) ($data['updateColumns'] ?? [])),
+		];
+	}
+
+	$result = synchy_write_sync_sql_file($prepared_tables, $sql_path);
+
+	if (is_wp_error($result)) {
+		return $result;
+	}
+
+	return [
+		'tables' => $prepared_tables,
+		'totalRows' => array_sum(array_map(static fn(array $table): int => count((array) ($table['rows'] ?? [])), $prepared_tables)),
+	];
+}
+
+function synchy_iterate_sync_sql_statements(string $sql_path, callable $callback): int
+{
+	$handle = @fopen($sql_path, 'rb');
+
+	if ($handle === false) {
+		throw new RuntimeException('Could not open the Sync SQL file.');
+	}
+
+	$buffer = '';
+	$in_single_quote = false;
+	$in_double_quote = false;
+	$escaped = false;
+	$statement_count = 0;
+
+	while (($line = fgets($handle)) !== false) {
+		if (!$in_single_quote && !$in_double_quote && $buffer === '') {
+			$trimmed = ltrim($line);
+
+			if ($trimmed === '' || strncmp($trimmed, '-- ', 3) === 0) {
+				continue;
+			}
+		}
+
+		$length = strlen($line);
+
+		for ($index = 0; $index < $length; $index++) {
+			$character = $line[$index];
+			$buffer .= $character;
+
+			if ($escaped) {
+				$escaped = false;
+				continue;
+			}
+
+			if ($character === '\\') {
+				$escaped = true;
+				continue;
+			}
+
+			if ($character === "'" && !$in_double_quote) {
+				$in_single_quote = !$in_single_quote;
+				continue;
+			}
+
+			if ($character === '"' && !$in_single_quote) {
+				$in_double_quote = !$in_double_quote;
+				continue;
+			}
+
+			if ($character === ';' && !$in_single_quote && !$in_double_quote) {
+				$statement = trim($buffer);
+				$buffer = '';
+
+				if ($statement === '' || strncmp(ltrim($statement), '-- ', 3) === 0) {
+					continue;
+				}
+
+				$callback($statement);
+				$statement_count++;
+			}
+		}
+	}
+
+	fclose($handle);
+	$statement = trim($buffer);
+
+	if ($statement !== '' && strncmp(ltrim($statement), '-- ', 3) !== 0) {
+		$callback($statement);
+		$statement_count++;
+	}
+
+	return $statement_count;
+}
+
+function synchy_execute_sync_sql_file(string $sql_path)
+{
+	global $wpdb;
+
+	$wpdb->query('START TRANSACTION');
+
+	try {
+		$count = synchy_iterate_sync_sql_statements(
+			$sql_path,
+			static function (string $statement) use ($wpdb): void {
+				$result = $wpdb->query($statement);
+
+				if ($result === false) {
+					throw new RuntimeException((string) $wpdb->last_error);
+				}
+			}
+		);
+
+		$wpdb->query('COMMIT');
+
+		return $count;
+	} catch (Throwable $throwable) {
+		$wpdb->query('ROLLBACK');
+
+		return new WP_Error(
+			'synchy_sync_sql_execute_failed',
+			sprintf(
+				/* translators: %s: SQL error */
+				__('Synchy could not apply the Sync database delta. %s', 'synchy'),
+				$throwable->getMessage()
+			)
+		);
+	}
+}
+
+function synchy_validate_sync_zip_entries(ZipArchive $zip)
+{
+	$allowed = [];
+	$has_manifest = false;
+	$has_sql = false;
+
+	for ($index = 0; $index < $zip->numFiles; $index++) {
+		$name = wp_normalize_path((string) $zip->getNameIndex($index));
+
+		if ($name === '' || str_contains($name, '../') || str_starts_with($name, '/')) {
+			return new WP_Error('synchy_sync_zip_invalid_path', __('The Sync package contains an invalid file path.', 'synchy'));
+		}
+
+		if (
+			!str_starts_with($name, 'plugins/')
+			&& !str_starts_with($name, 'themes/')
+			&& !str_starts_with($name, 'uploads/')
+			&& !str_starts_with($name, '.synchy-sync/')
+		) {
+			return new WP_Error(
+				'synchy_sync_zip_invalid_scope',
+				sprintf(
+					/* translators: %s: zip entry path */
+					__('The Sync package contains a disallowed path: %s', 'synchy'),
+					$name
+				)
+			);
+		}
+
+		if ($name === '.synchy-sync/db/manifest.json') {
+			$has_manifest = true;
+		}
+
+		if ($name === '.synchy-sync/db/delta.sql') {
+			$has_sql = true;
+		}
+
+		$allowed[] = $name;
+	}
+
+	if (!$has_manifest || !$has_sql) {
+		return new WP_Error('synchy_sync_zip_missing_meta', __('The Sync package is missing its manifest or SQL metadata.', 'synchy'));
+	}
+
+	return $allowed;
+}
+
+function synchy_extract_sync_package_to_content(string $zip_path)
+{
+	$zip = new ZipArchive();
+	$result = $zip->open($zip_path);
+
+	if ($result !== true) {
+		return new WP_Error('synchy_sync_zip_open_failed', __('Synchy could not open the uploaded Sync package.', 'synchy'));
+	}
+
+	$entries = synchy_validate_sync_zip_entries($zip);
+
+	if (is_wp_error($entries)) {
+		$zip->close();
+		return $entries;
+	}
+
+	$extracted = $zip->extractTo(WP_CONTENT_DIR, $entries);
+	$zip->close();
+
+	if (!$extracted) {
+		return new WP_Error('synchy_sync_extract_failed', __('Synchy could not extract the Sync package into wp-content.', 'synchy'));
+	}
+
+	return [
+		'manifest_path' => wp_normalize_path(WP_CONTENT_DIR . '/.synchy-sync/db/manifest.json'),
+		'sql_path' => wp_normalize_path(WP_CONTENT_DIR . '/.synchy-sync/db/delta.sql'),
+		'meta_root' => wp_normalize_path(WP_CONTENT_DIR . '/.synchy-sync'),
+	];
+}
+
+function synchy_clear_sync_caches(): void
+{
+	if (function_exists('wp_cache_flush')) {
+		wp_cache_flush();
+	}
+
+	if (function_exists('wp_clean_themes_cache')) {
+		wp_clean_themes_cache();
+	}
+
+	if (function_exists('delete_expired_transients')) {
+		delete_expired_transients();
+	}
+}
+
+function synchy_handle_remote_sync_request(WP_REST_Request $request)
+{
+	if (!class_exists('ZipArchive')) {
+		return new WP_Error('synchy_sync_zip_missing', __('ZipArchive is not available on the destination site.', 'synchy'), ['status' => 500]);
+	}
+
+	if (function_exists('wp_raise_memory_limit')) {
+		wp_raise_memory_limit('admin');
+	}
+
+	if (function_exists('set_time_limit')) {
+		@set_time_limit(0);
+	}
+
+	$temp_dir = synchy_prepare_sync_temp_dir('incoming');
+
+	if (is_wp_error($temp_dir)) {
+		return new WP_Error($temp_dir->get_error_code(), $temp_dir->get_error_message(), ['status' => 500]);
+	}
+
+	$meta_root = '';
+
+	try {
+		$filename = sanitize_file_name((string) $request->get_header('X-Syncy-Filename'));
+
+		if ($filename === '') {
+			$filename = 'sync-package.zip';
+		}
+
+		$zip_path = wp_normalize_path(trailingslashit($temp_dir) . $filename);
+		$body = $request->get_body();
+
+		if ($body === '') {
+			return new WP_Error('synchy_sync_request_empty', __('Synchy received an empty Sync package.', 'synchy'), ['status' => 400]);
+		}
+
+		if (file_put_contents($zip_path, $body) === false) {
+			return new WP_Error('synchy_sync_request_write_failed', __('Synchy could not save the uploaded Sync package on the destination site.', 'synchy'), ['status' => 500]);
+		}
+
+		$extract = synchy_extract_sync_package_to_content($zip_path);
+
+		if (is_wp_error($extract)) {
+			return new WP_Error($extract->get_error_code(), $extract->get_error_message(), ['status' => 400]);
+		}
+
+		$meta_root = (string) ($extract['meta_root'] ?? '');
+		$manifest_path = (string) ($extract['manifest_path'] ?? '');
+
+		if ($manifest_path === '' || !is_readable($manifest_path)) {
+			return new WP_Error('synchy_sync_manifest_missing', __('Synchy could not find the uploaded Sync manifest on the destination site.', 'synchy'), ['status' => 400]);
+		}
+
+		$manifest = json_decode((string) file_get_contents($manifest_path), true);
+
+		if (!is_array($manifest)) {
+			return new WP_Error('synchy_sync_manifest_invalid', __('Synchy could not decode the uploaded Sync manifest.', 'synchy'), ['status' => 400]);
+		}
+
+		$sql_path = wp_normalize_path(trailingslashit($temp_dir) . 'apply.sql');
+		$prepared_sql = synchy_build_sync_sql_from_manifest($manifest, $sql_path);
+
+		if (is_wp_error($prepared_sql)) {
+			return new WP_Error($prepared_sql->get_error_code(), $prepared_sql->get_error_message(), ['status' => 500]);
+		}
+
+		$executed = synchy_execute_sync_sql_file($sql_path);
+
+		if (is_wp_error($executed)) {
+			return new WP_Error($executed->get_error_code(), $executed->get_error_message(), ['status' => 500]);
+		}
+
+		$synced_at = max(0, (int) ($manifest['syncedAt'] ?? time()));
+		$files_synced = (int) ($manifest['files']['count'] ?? 0);
+		$db_rows_synced = (int) ($prepared_sql['totalRows'] ?? 0);
+		$mode = (string) ($manifest['mode'] ?? ($synced_at > 0 ? 'delta' : 'baseline'));
+
+		synchy_set_sync_last_time($synced_at);
+		synchy_set_sync_status([
+			'status' => 'success',
+			'mode' => $mode,
+			'filesSynced' => $files_synced,
+			'dbRowsSynced' => $db_rows_synced,
+			'durationSeconds' => 0,
+			'destinationUrl' => home_url('/'),
+			'at' => gmdate('c'),
+			'lastSyncTime' => $synced_at,
+			'message' => sprintf(
+				/* translators: 1: file count, 2: row count */
+				__('Applied Sync with %1$d files and %2$d DB rows on the destination site.', 'synchy'),
+				$files_synced,
+				$db_rows_synced
+			),
+		]);
+
+		synchy_clear_sync_caches();
+
+		return rest_ensure_response([
+			'success' => true,
+			'mode' => $mode,
+			'filesSynced' => $files_synced,
+			'dbRowsSynced' => $db_rows_synced,
+			'lastSyncTime' => $synced_at,
+			'message' => sprintf(
+				/* translators: 1: file count, 2: row count */
+				__('Synced %1$d files and %2$d DB rows on the destination site.', 'synchy'),
+				$files_synced,
+				$db_rows_synced
+			),
+		]);
+	} finally {
+		if ($meta_root !== '' && is_dir($meta_root)) {
+			synchy_rrmdir($meta_root);
+		}
+
+		if (is_string($temp_dir) && $temp_dir !== '' && is_dir($temp_dir)) {
+			synchy_rrmdir($temp_dir);
+		}
+	}
+}
+
+function synchy_format_sync_duration(float $seconds): string
+{
+	$seconds = max(0.01, $seconds);
+
+	return number_format($seconds, 2) . 's';
+}
+
+function synchy_preview_sync_changes(array $raw_options)
+{
+	$options = synchy_sanitize_site_sync_options($raw_options);
+	$validation = synchy_validate_site_sync_options($options);
+
+	if (is_wp_error($validation)) {
+		return $validation;
+	}
+
+	$preview = synchy_build_sync_package($options, true);
+
+	if (is_wp_error($preview)) {
+		return $preview;
+	}
+
+	$result = (array) ($preview['preview'] ?? []);
+	$result['lastStatus'] = synchy_get_sync_status();
+
+	return $result;
+}
+
+function synchy_run_sync_changes(array $raw_options)
+{
+	$options = synchy_sanitize_site_sync_options($raw_options);
+	$validation = synchy_validate_site_sync_options($options);
+
+	if (is_wp_error($validation)) {
+		synchy_set_sync_status([
+			'status' => 'error',
+			'message' => $validation->get_error_message(),
+			'at' => gmdate('c'),
+		]);
+
+		return $validation;
+	}
+
+	$started = microtime(true);
+	$package = synchy_build_sync_package($options, false);
+
+	if (is_wp_error($package)) {
+		synchy_set_sync_status([
+			'status' => 'error',
+			'message' => $package->get_error_message(),
+			'at' => gmdate('c'),
+		]);
+
+		return $package;
+	}
+
+	$summary = (array) ($package['preview'] ?? []);
+
+	if (!empty($package['no_changes'])) {
+		$status = [
+			'status' => 'idle',
+			'mode' => (string) ($summary['mode'] ?? 'delta'),
+			'filesSynced' => 0,
+			'dbRowsSynced' => 0,
+			'durationSeconds' => 0,
+			'destinationUrl' => (string) ($options['destination_url'] ?? ''),
+			'at' => gmdate('c'),
+			'message' => __('No changes detected since the last successful Sync.', 'synchy'),
+			'lastSyncTime' => synchy_get_sync_last_time(),
+		];
+
+		synchy_set_sync_status($status);
+
+		return $status;
+	}
+
+	$temp_dir = (string) ($package['temp_dir'] ?? '');
+	$remote = synchy_sync_remote_request($options, (string) ($package['zip_path'] ?? ''));
+
+	if ($temp_dir !== '' && is_dir($temp_dir)) {
+		synchy_rrmdir($temp_dir);
+	}
+
+	if (is_wp_error($remote)) {
+		$status = [
+			'status' => 'error',
+			'mode' => (string) ($summary['mode'] ?? 'delta'),
+			'filesSynced' => (int) ($summary['filesCount'] ?? 0),
+			'dbRowsSynced' => (int) ($summary['dbRows'] ?? 0),
+			'durationSeconds' => round(microtime(true) - $started, 2),
+			'destinationUrl' => (string) ($options['destination_url'] ?? ''),
+			'at' => gmdate('c'),
+			'message' => $remote->get_error_message(),
+			'lastSyncTime' => synchy_get_sync_last_time(),
+		];
+
+		synchy_set_sync_status($status);
+
+		return $remote;
+	}
+
+	$next_state = isset($package['next_state']) && is_array($package['next_state']) ? $package['next_state'] : [];
+	$next_state['last_result'] = [
+		'mode' => (string) ($summary['mode'] ?? 'delta'),
+		'filesSynced' => (int) ($summary['filesCount'] ?? 0),
+		'dbRowsSynced' => (int) ($summary['dbRows'] ?? 0),
+		'at' => gmdate('c'),
+	];
+
+	$state_written = synchy_write_sync_state($next_state);
+	$sync_time = max(0, (int) ($next_state['last_sync_time'] ?? time()));
+	synchy_set_sync_last_time($sync_time);
+
+	$duration = round(microtime(true) - $started, 2);
+	$status = [
+		'status' => 'success',
+		'mode' => (string) ($summary['mode'] ?? 'delta'),
+		'filesSynced' => (int) ($summary['filesCount'] ?? 0),
+		'dbRowsSynced' => (int) ($summary['dbRows'] ?? 0),
+		'durationSeconds' => $duration,
+		'destinationUrl' => (string) ($options['destination_url'] ?? ''),
+		'at' => gmdate('c'),
+		'lastSyncTime' => $sync_time,
+		'message' => sprintf(
+			/* translators: 1: file count, 2: db row count, 3: duration */
+			__('Synced %1$d files and %2$d DB rows in %3$s.', 'synchy'),
+			(int) ($summary['filesCount'] ?? 0),
+			(int) ($summary['dbRows'] ?? 0),
+			synchy_format_sync_duration($duration)
+		),
+		'remote' => $remote,
+	];
+
+	if (is_wp_error($state_written)) {
+		$status['message'] .= ' ' . __('The live site finished, but Synchy could not update the local sync state file.', 'synchy');
+	}
+
+	synchy_set_sync_status($status);
+
+	return $status;
 }
 
 function synchy_get_remote_push_root_path(): string
@@ -3097,68 +4578,203 @@ function synchy_render_site_sync_page(array $current): void
 
 function synchy_render_incremental_site_sync_page(array $current): void
 {
+	$options = synchy_get_site_sync_options();
+	$password_hint = synchy_get_site_sync_password_hint($options);
+	$last_sync_time = synchy_get_sync_last_time();
+	$status = synchy_get_sync_status();
+	$status_state = (string) ($status['status'] ?? '');
+	$status_badge = __('Awaiting baseline', 'synchy');
+	$status_message = __('No Sync has completed yet. The first Sync sends a baseline for the selected folders and database tables. Later Sync runs send deltas only.', 'synchy');
+
+	if ($status_state === 'success') {
+		$status_badge = __('Success', 'synchy');
+		$status_message = (string) ($status['message'] ?? __('The most recent Sync completed successfully.', 'synchy'));
+	} elseif ($status_state === 'error') {
+		$status_badge = __('Error', 'synchy');
+		$status_message = (string) ($status['message'] ?? __('The most recent Sync failed.', 'synchy'));
+	} elseif ($status_state === 'idle') {
+		$status_badge = __('No changes', 'synchy');
+		$status_message = (string) ($status['message'] ?? __('No file or database changes were detected for Sync.', 'synchy'));
+	} elseif ($last_sync_time > 0) {
+		$status_badge = __('Delta ready', 'synchy');
+	}
 	?>
 	<div class="wrap synchy-admin">
 		<?php synchy_render_notice(); ?>
 		<div class="synchy-shell">
 			<div class="synchy-hero">
 				<div>
-					<p class="synchy-eyebrow"><?php esc_html_e('Incremental Workflow', 'synchy'); ?></p>
+					<p class="synchy-eyebrow"><?php esc_html_e('Selective Delta Workflow', 'synchy'); ?></p>
 					<h1><?php echo esc_html($current['headline']); ?></h1>
 					<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
 				</div>
 				<div class="synchy-status">
 					<span class="synchy-status__dot" aria-hidden="true"></span>
-					<?php esc_html_e('Planning', 'synchy'); ?>
+					<?php echo esc_html($last_sync_time > 0 ? __('Delta ready', 'synchy') : __('Baseline ready', 'synchy')); ?>
 				</div>
 			</div>
 
-			<div class="synchy-grid synchy-grid--export">
-				<div class="synchy-panel">
-					<h2><?php esc_html_e('What This New Area Is For', 'synchy'); ?></h2>
-					<ul class="synchy-checklist synchy-checklist--detail">
-						<li>
-							<strong><?php esc_html_e('Start after an initial full push', 'synchy'); ?></strong>
-							<span><?php esc_html_e('Use Upload to Live first so the destination starts from a known full-package baseline.', 'synchy'); ?></span>
-						</li>
-						<li>
-							<strong><?php esc_html_e('Push only smaller follow-up changes', 'synchy'); ?></strong>
-							<span><?php esc_html_e('The goal here is to send changed files and controlled update instructions instead of another full backup and restore.', 'synchy'); ?></span>
-						</li>
-						<li>
-							<strong><?php esc_html_e('Avoid another manual restore cycle', 'synchy'); ?></strong>
-							<span><?php esc_html_e('This area is where Synchy will evolve toward direct placement of smaller changes after the first full deployment.', 'synchy'); ?></span>
-						</li>
-					</ul>
+			<form method="post" action="options.php" class="synchy-form" data-synchy-sync-form>
+				<?php settings_fields('synchy_site_sync'); ?>
+
+				<div class="synchy-grid synchy-grid--export">
+					<div class="synchy-panel">
+						<h2><?php esc_html_e('What Sync Does', 'synchy'); ?></h2>
+						<ul class="synchy-checklist synchy-checklist--detail">
+							<li>
+								<strong><?php esc_html_e('First Sync builds a baseline', 'synchy'); ?></strong>
+								<span><?php esc_html_e('The first successful Sync sends all targeted plugins, the active theme, uploads, and the selected WordPress data tables.', 'synchy'); ?></span>
+							</li>
+							<li>
+								<strong><?php esc_html_e('Every later Sync sends deltas only', 'synchy'); ?></strong>
+								<span><?php esc_html_e('Synchy detects changed files plus changed posts, postmeta, options, terms, taxonomies, and relationships since the last successful Sync.', 'synchy'); ?></span>
+							</li>
+							<li>
+								<strong><?php esc_html_e('Live applies changes directly', 'synchy'); ?></strong>
+								<span><?php esc_html_e('The destination extracts the changed files into wp-content, safely rewrites URLs and paths in changed data, applies the SQL delta, then clears caches.', 'synchy'); ?></span>
+							</li>
+						</ul>
+					</div>
+
+					<div class="synchy-panel synchy-panel--muted">
+						<h2><?php esc_html_e('Destination Connection', 'synchy'); ?></h2>
+						<div class="synchy-field">
+							<label class="synchy-label" for="synchy-sync-destination-url"><?php esc_html_e('WordPress URL', 'synchy'); ?></label>
+							<input
+								id="synchy-sync-destination-url"
+								type="url"
+								class="regular-text code"
+								name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[destination_url]"
+								value="<?php echo esc_attr((string) $options['destination_url']); ?>"
+								placeholder="https://live-site.com"
+								data-synchy-sync-url
+							/>
+						</div>
+
+						<div class="synchy-field">
+							<label class="synchy-label" for="synchy-sync-destination-username"><?php esc_html_e('Username', 'synchy'); ?></label>
+							<input
+								id="synchy-sync-destination-username"
+								type="text"
+								class="regular-text"
+								name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[destination_username]"
+								value="<?php echo esc_attr((string) $options['destination_username']); ?>"
+								autocomplete="username"
+								data-synchy-sync-username
+							/>
+						</div>
+
+						<div class="synchy-field">
+							<label class="synchy-label" for="synchy-sync-destination-password"><?php esc_html_e('Application Password', 'synchy'); ?></label>
+							<input
+								id="synchy-sync-destination-password"
+								type="password"
+								class="regular-text"
+								name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[destination_application_password]"
+								value=""
+								autocomplete="new-password"
+								placeholder="<?php esc_attr_e('Leave blank to keep the saved password', 'synchy'); ?>"
+								data-synchy-sync-password
+							/>
+							<p class="synchy-field-note"><?php echo esc_html($password_hint); ?></p>
+						</div>
+
+						<div class="synchy-field">
+							<label class="synchy-toggle">
+								<input
+									type="checkbox"
+									name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[verify_ssl]"
+									value="1"
+									<?php checked(!empty($options['verify_ssl'])); ?>
+								/>
+								<span><?php esc_html_e('Verify HTTPS certificates', 'synchy'); ?></span>
+							</label>
+							<p class="synchy-field-note">
+								<?php esc_html_e('Leave this on for real live sites. Turn it off only when you are testing against a local or self-signed destination.', 'synchy'); ?>
+							</p>
+						</div>
+
+						<div class="synchy-run-export">
+							<div class="synchy-input-row">
+								<button type="submit" class="button" data-synchy-save-sync><?php esc_html_e('Save Connection', 'synchy'); ?></button>
+								<button type="button" class="button" data-synchy-test-sync><?php esc_html_e('Test Connection', 'synchy'); ?></button>
+								<button type="button" class="button" data-synchy-preview-sync><?php esc_html_e('Preview Changes', 'synchy'); ?></button>
+								<button type="button" class="button button-primary button-large" data-synchy-run-sync disabled><?php esc_html_e('Sync Changes', 'synchy'); ?></button>
+							</div>
+						</div>
+					</div>
 				</div>
 
-				<div class="synchy-panel synchy-panel--muted">
-					<h2><?php esc_html_e('Problems To Solve', 'synchy'); ?></h2>
-					<ul class="synchy-checklist">
-						<li><?php esc_html_e('Detect added, changed, and deleted files reliably between source and destination.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Apply incremental file changes without breaking a live site mid-push.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Decide how database changes should be handled without another full database overwrite.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Keep rollback and audit visibility even when the push is only partial.', 'synchy'); ?></li>
-					</ul>
-				</div>
-			</div>
-
-			<div class="synchy-grid synchy-grid--export">
-				<div class="synchy-panel">
-					<h2><?php esc_html_e('Likely Direction', 'synchy'); ?></h2>
-					<ul class="synchy-checklist">
-						<li><?php esc_html_e('Create a source manifest and compare it against the destination manifest.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Upload only the files that changed since the last successful full push.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Track deletes explicitly so removed files do not linger on the live site.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Handle database changes as a separate strategy instead of silently replacing the whole database again.', 'synchy'); ?></li>
-					</ul>
+				<div class="synchy-panel synchy-panel--wide synchy-site-sync-result is-hidden" data-synchy-sync-connection-result>
+					<div class="synchy-stack synchy-stack--compact">
+						<div class="synchy-stack__split">
+							<h2><?php esc_html_e('Connection Check', 'synchy'); ?></h2>
+							<span class="synchy-badge" data-synchy-sync-connection-badge><?php esc_html_e('Pending', 'synchy'); ?></span>
+						</div>
+						<p class="synchy-field-note" data-synchy-sync-connection-message><?php esc_html_e('Use Test Connection to verify the destination Synchy receiver.', 'synchy'); ?></p>
+						<div class="synchy-export-meta" data-synchy-sync-connection-meta></div>
+					</div>
 				</div>
 
-				<div class="synchy-panel synchy-panel--muted">
-					<h2><?php esc_html_e('Current Status', 'synchy'); ?></h2>
-					<p><?php esc_html_e('This page is the work area for the next sync iteration. The active production-ready path today is still the full-package upload under Upload to Live.', 'synchy'); ?></p>
+				<div class="synchy-panel synchy-panel--wide synchy-site-sync-result" data-synchy-sync-preview-panel>
+					<div class="synchy-stack synchy-stack--compact">
+						<div class="synchy-stack__split">
+							<h2><?php esc_html_e('Preview', 'synchy'); ?></h2>
+							<span class="synchy-badge" data-synchy-sync-preview-badge><?php echo esc_html($last_sync_time > 0 ? __('Delta', 'synchy') : __('Baseline', 'synchy')); ?></span>
+						</div>
+						<p class="synchy-field-note" data-synchy-sync-preview-message><?php esc_html_e('Run Preview Changes to see how many files and database rows Synchy will sync before anything is sent.', 'synchy'); ?></p>
+						<div class="synchy-export-meta" data-synchy-sync-preview-meta></div>
+					</div>
 				</div>
-			</div>
+
+				<div class="synchy-grid synchy-grid--export">
+					<div class="synchy-panel">
+						<h2><?php esc_html_e('Current Scope', 'synchy'); ?></h2>
+						<ul class="synchy-checklist">
+							<li><?php esc_html_e('Files: wp-content/plugins, the active theme only, and wp-content/uploads.', 'synchy'); ?></li>
+							<li><?php esc_html_e('Database: posts, postmeta, options, terms, term taxonomies, and term relationships.', 'synchy'); ?></li>
+							<li><?php esc_html_e('Users and passwords are never synced.', 'synchy'); ?></li>
+							<li><?php esc_html_e('File deletes are not applied on the live site yet. Sync only overwrites changed files and adds new ones.', 'synchy'); ?></li>
+						</ul>
+					</div>
+
+					<div class="synchy-panel synchy-panel--muted" data-synchy-sync-status-panel>
+						<div class="synchy-stack synchy-stack--compact">
+							<div class="synchy-stack__split">
+								<h2><?php esc_html_e('Last Sync Status', 'synchy'); ?></h2>
+								<span class="synchy-badge" data-synchy-sync-status-badge><?php echo esc_html($status_badge); ?></span>
+							</div>
+							<p data-synchy-sync-status-message><?php echo esc_html($status_message); ?></p>
+							<div class="synchy-export-meta" data-synchy-sync-status-meta>
+								<div>
+									<span class="synchy-export-meta__label"><?php esc_html_e('Last successful Sync', 'synchy'); ?></span>
+									<strong><?php echo esc_html($last_sync_time > 0 ? get_date_from_gmt(gmdate('Y-m-d H:i:s', $last_sync_time), get_option('date_format') . ' ' . get_option('time_format')) : __('Never', 'synchy')); ?></strong>
+								</div>
+								<div>
+									<span class="synchy-export-meta__label"><?php esc_html_e('Destination', 'synchy'); ?></span>
+									<strong><?php echo esc_html((string) ($status['destinationUrl'] ?? $options['destination_url'] ?? __('Not set', 'synchy'))); ?></strong>
+								</div>
+								<div>
+									<span class="synchy-export-meta__label"><?php esc_html_e('Files synced', 'synchy'); ?></span>
+									<strong><?php echo esc_html(number_format_i18n((int) ($status['filesSynced'] ?? 0))); ?></strong>
+								</div>
+								<div>
+									<span class="synchy-export-meta__label"><?php esc_html_e('DB rows synced', 'synchy'); ?></span>
+									<strong><?php echo esc_html(number_format_i18n((int) ($status['dbRowsSynced'] ?? 0))); ?></strong>
+								</div>
+								<div>
+									<span class="synchy-export-meta__label"><?php esc_html_e('Mode', 'synchy'); ?></span>
+									<strong><?php echo esc_html(ucfirst((string) ($status['mode'] ?? ($last_sync_time > 0 ? 'delta' : 'baseline')))); ?></strong>
+								</div>
+								<div>
+									<span class="synchy-export-meta__label"><?php esc_html_e('Duration', 'synchy'); ?></span>
+									<strong><?php echo esc_html(!empty($status['durationSeconds']) ? synchy_format_sync_duration((float) $status['durationSeconds']) : __('N/A', 'synchy')); ?></strong>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+			</form>
 		</div>
 	</div>
 	<?php
@@ -3498,6 +5114,57 @@ add_action('wp_ajax_synchy_continue_site_sync_push', function (): void {
 	wp_send_json_success(['job' => synchy_build_site_sync_job_response($job)]);
 });
 
+add_action('wp_ajax_synchy_preview_sync_changes', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to preview Synchy Sync changes.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
+	$result = synchy_preview_sync_changes($options);
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(['message' => $result->get_error_message()], 400);
+	}
+
+	wp_send_json_success(['preview' => $result]);
+});
+
+add_action('wp_ajax_synchy_test_sync_connection', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to test Synchy Sync connections.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
+	$result = synchy_test_site_sync_connection($options);
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(['message' => $result->get_error_message()], 400);
+	}
+
+	wp_send_json_success(['remoteSite' => $result]);
+});
+
+add_action('wp_ajax_synchy_run_sync_changes', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to run Synchy Sync changes.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
+	$result = synchy_run_sync_changes($options);
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(['message' => $result->get_error_message()], 400);
+	}
+
+	wp_send_json_success(['status' => $result]);
+});
+
 add_action('admin_post_synchy_download_export', function (): void {
 	if (!current_user_can('manage_options')) {
 		wp_die(esc_html__('You are not allowed to download Synchy exports.', 'synchy'));
@@ -3554,6 +5221,28 @@ add_action('rest_api_init', function (): void {
 			['status' => rest_authorization_required_code()]
 		);
 	};
+
+	$sync_permission = static function () {
+		if (current_user_can('manage_options')) {
+			return true;
+		}
+
+		return new WP_Error(
+			'synchy_sync_rest_forbidden',
+			__('You are not allowed to access Synchy Sync endpoints.', 'synchy'),
+			['status' => rest_authorization_required_code()]
+		);
+	};
+
+	register_rest_route(
+		'syncy/v1',
+		'/sync',
+		[
+			'methods' => 'POST',
+			'callback' => 'synchy_handle_remote_sync_request',
+			'permission_callback' => $sync_permission,
+		]
+	);
 
 	register_rest_route(
 		'synchy/v1',
@@ -3777,11 +5466,9 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 		);
 	}
 
-	if (!isset($_GET['page']) || sanitize_key((string) $_GET['page']) !== 'synchy-export') {
-		if (!isset($_GET['page']) || sanitize_key((string) $_GET['page']) !== 'synchy-push-live-site') {
-			return;
-		}
+	$page = isset($_GET['page']) ? sanitize_key((string) $_GET['page']) : '';
 
+	if ($page === 'synchy-push-live-site') {
 		$site_sync_script_path = plugin_dir_path(__FILE__) . 'assets/site-sync.js';
 
 		if (!file_exists($site_sync_script_path)) {
@@ -3816,6 +5503,67 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 			]
 		);
 
+		return;
+	}
+
+	if ($page === 'synchy-site-sync') {
+		$sync_script_path = plugin_dir_path(__FILE__) . 'assets/sync.js';
+
+		if (!file_exists($sync_script_path)) {
+			return;
+		}
+
+		wp_enqueue_script(
+			'synchy-sync',
+			plugin_dir_url(__FILE__) . 'assets/sync.js',
+			[],
+			(string) filemtime($sync_script_path),
+			true
+		);
+
+		wp_localize_script(
+			'synchy-sync',
+			'synchySyncConfig',
+			[
+				'ajaxUrl' => admin_url('admin-ajax.php'),
+				'nonce' => wp_create_nonce('synchy_sync_ajax'),
+				'strings' => [
+					'connectionReady' => __('Connection ready', 'synchy'),
+					'connectionError' => __('Connection failed', 'synchy'),
+					'previewReady' => __('Preview ready', 'synchy'),
+					'previewError' => __('Preview failed', 'synchy'),
+					'syncAction' => __('Sync Changes', 'synchy'),
+					'syncingAction' => __('Syncing...', 'synchy'),
+					'success' => __('Success', 'synchy'),
+					'error' => __('Error', 'synchy'),
+					'noChanges' => __('No changes', 'synchy'),
+					'awaitingBaseline' => __('Awaiting baseline', 'synchy'),
+					'baseline' => __('Baseline', 'synchy'),
+					'delta' => __('Delta', 'synchy'),
+					'lastRun' => __('Last run', 'synchy'),
+					'lastSync' => __('Last successful Sync', 'synchy'),
+					'destination' => __('Destination', 'synchy'),
+					'files' => __('Files', 'synchy'),
+					'dbRows' => __('DB rows', 'synchy'),
+					'duration' => __('Duration', 'synchy'),
+					'site' => __('Site', 'synchy'),
+					'pluginVersion' => __('Plugin version', 'synchy'),
+					'authenticatedAs' => __('Authenticated as', 'synchy'),
+					'tableUpdates' => __('Table updates', 'synchy'),
+					'sampleFiles' => __('Sample files', 'synchy'),
+					'never' => __('Never', 'synchy'),
+					'na' => __('N/A', 'synchy'),
+					'previewDefault' => __('Run Preview Changes to review changed files and database rows before syncing.', 'synchy'),
+					'unknownError' => __('Synchy hit an unexpected Sync error.', 'synchy'),
+					'confirmSync' => __('Sync the previewed changes to the destination site now?', 'synchy'),
+				],
+			]
+		);
+
+		return;
+	}
+
+	if ($page !== 'synchy-export') {
 		return;
 	}
 
