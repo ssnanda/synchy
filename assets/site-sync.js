@@ -17,6 +17,7 @@
 	const progressDetail = document.querySelector("[data-synchy-site-sync-detail]");
 	const progressTiming = document.querySelector("[data-synchy-site-sync-timing]");
 	const progressWarning = document.querySelector("[data-synchy-site-sync-warning]");
+	const stages = document.querySelector("[data-synchy-site-sync-stages]");
 	const resultPanel = document.querySelector("[data-synchy-site-sync-result]");
 	const resultBadge = document.querySelector("[data-synchy-site-sync-result-badge]");
 	const resultMessage = document.querySelector("[data-synchy-site-sync-result-message]");
@@ -229,6 +230,28 @@
 		setProgressTiming(job, "");
 	};
 
+	const renderStages = (job) => {
+		if (!stages) {
+			return;
+		}
+
+		const items = Array.isArray(job && job.stages) ? job.stages : Array.isArray(config.defaultStages) ? config.defaultStages : [];
+
+		stages.innerHTML = items
+			.map(
+				(stage) => `
+					<div class="synchy-export-stage is-${escapeHtml(stage.state || "pending")}">
+						<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
+						<div class="synchy-export-stage__content">
+							<strong>${escapeHtml(stage.label || "")}</strong>
+							<span>${escapeHtml(stage.description || "")}</span>
+						</div>
+					</div>
+				`
+			)
+			.join("");
+	};
+
 	const renderProgress = (job) => {
 		if (!progress || !job) {
 			return;
@@ -252,6 +275,7 @@
 			progressMessage.textContent = job.message || "";
 		}
 
+		renderStages(job);
 		setProgressDetail(job);
 		setProgressWarning(job);
 	};
@@ -436,5 +460,7 @@
 		setBusyState(true);
 		renderProgress(currentJob);
 		pollJob(currentJob.id);
+	} else {
+		renderStages(currentJob);
 	}
 })();
