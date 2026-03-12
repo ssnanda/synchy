@@ -797,6 +797,36 @@ function synchyInstallerSearchReplace(string $search, string $replace, mysqli $c
 	$messages[] = 'URL replacement completed for ' . number_format($total_updates) . ' rows.';
 }
 
+function synchyInstallerForceCoreUrls(mysqli $connection, string $prefix, string $destinationUrl, array &$messages): void
+{
+	$table = synchyInstallerQuoteIdentifier($prefix . 'options');
+	$destinationUrl = synchyInstallerNormalizeUrl($destinationUrl);
+
+	if ($destinationUrl === '') {
+		return;
+	}
+
+	$sql = 'UPDATE ' . $table . ' SET option_value = ? WHERE option_name IN (?, ?)';
+	$statement = $connection->prepare($sql);
+
+	if (!$statement instanceof mysqli_stmt) {
+		throw new RuntimeException('Could not prepare the destination URL update for the options table: ' . $connection->error);
+	}
+
+	$home = 'home';
+	$siteurl = 'siteurl';
+	$statement->bind_param('sss', $destinationUrl, $home, $siteurl);
+
+	if (!$statement->execute()) {
+		$error = $statement->error !== '' ? $statement->error : $connection->error;
+		$statement->close();
+		throw new RuntimeException('Could not update the home/siteurl options to the destination URL: ' . $error);
+	}
+
+	$statement->close();
+	$messages[] = 'Forced home and siteurl to ' . $destinationUrl . '.';
+}
+
 function synchyInstallerUpdateWpConfig(string $wordpressRoot, array $config, array &$messages): void
 {
 	$config_path = synchyInstallerPath($wordpressRoot, 'wp-config.php');
@@ -903,7 +933,7 @@ $restore_complete = false;
 $database_list_message = '';
 $package_directory = str_replace('\\', '/', __DIR__);
 $archive_path = synchyInstallerFindArchivePath($package_directory);
-$wordpress_root = synchyInstallerFindWordPressRoot($package_directory);
+$wordpress_root = $package_directory;
 $package_id = synchyInstallerConfiguredValue(SYNCHY_PACKAGE_ID);
 $package_name = synchyInstallerConfiguredValue(SYNCHY_PACKAGE_NAME);
 $source_home = synchyInstallerNormalizeUrl(synchyInstallerConfiguredValue(SYNCHY_SOURCE_HOME_URL));
@@ -1007,10 +1037,17 @@ if ($request_method === 'POST') {
 			synchyInstallerDropDatabaseObjects($connection, $messages);
 			synchyInstallerImportDatabase($database_path, $connection, $messages);
 
-				$pairs = [
-					[$source_home, $destination_url],
-					[$source_site, $destination_url],
-				];
+				$pairs = [];
+
+				foreach ([$source_home, $source_site] as $source_url) {
+					$source_url = synchyInstallerNormalizeUrl($source_url);
+
+					if ($source_url === '' || $source_url === $destination_url || isset($pairs[$source_url])) {
+						continue;
+					}
+
+					$pairs[$source_url] = [$source_url, $destination_url];
+				}
 
 			foreach ($pairs as $pair) {
 				if ($pair[0] !== '' && $pair[1] !== '' && $pair[0] !== $pair[1]) {
@@ -1018,6 +1055,7 @@ if ($request_method === 'POST') {
 				}
 			}
 
+			synchyInstallerForceCoreUrls($connection, $database_config['prefix'], $destination_url, $messages);
 			synchyInstallerUpdateWpConfig($wordpress_root, $database_config, $messages);
 			$connection->close();
 			$connection = null;
@@ -1035,6 +1073,8 @@ if ($request_method === 'POST') {
 		synchyInstallerRemoveMaintenanceFile($wordpress_root);
 	}
 }
+
+$warnings = array_values(array_unique($warnings));
 ?><!doctype html>
 <html lang="en">
 <head>
