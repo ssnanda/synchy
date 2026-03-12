@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.21
+ * Version: 0.7.22
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.21';
+const SYNCHY_VERSION = '0.7.22';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -6573,16 +6573,29 @@ function synchy_render_page(string $page_slug): void
 
 	$pages = synchy_get_pages();
 	$current = null;
+	$export_page = null;
 
 	foreach ($pages as $page) {
 		if ($page['slug'] === $page_slug) {
 			$current = $page;
-			break;
+		}
+
+		if ($page['slug'] === 'synchy-export') {
+			$export_page = $page;
 		}
 	}
 
 	if ($current === null) {
 		$current = $pages[0];
+	}
+
+	if ($export_page === null) {
+		$export_page = $current;
+	}
+
+	if ($page_slug === SYNCHY_SLUG) {
+		synchy_render_export_page($export_page);
+		return;
 	}
 
 	if ($page_slug === 'synchy-export') {
