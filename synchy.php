@@ -1,8 +1,10 @@
 <?php
 /**
  * Plugin Name: Synchy
+ * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.6.0
+ * Version: 0.6.1
+ * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
 
@@ -10,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.6.0';
+const SYNCHY_VERSION = '0.6.1';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -20,7 +22,7 @@ const SYNCHY_SITE_SYNC_JOB_OPTION = 'synchy_site_sync_job';
 const SYNCHY_NOTICE_PREFIX = 'synchy_admin_notice_';
 
 if (!defined('SYNCHY_GITHUB_REPOSITORY')) {
-	define('SYNCHY_GITHUB_REPOSITORY', '');
+	define('SYNCHY_GITHUB_REPOSITORY', 'https://github.com/ssnanda/synchy');
 }
 
 if (!defined('SYNCHY_GITHUB_BRANCH')) {
