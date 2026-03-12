@@ -190,6 +190,15 @@ function synchyInstallerIsWordPressRoot(string $root): bool
 	return is_readable($config_path) && is_dir($wp_admin);
 }
 
+function synchyInstallerGenerateSecret(): string
+{
+	try {
+		return bin2hex(random_bytes(32));
+	} catch (Throwable $throwable) {
+		return sha1(uniqid('synchy', true) . microtime(true));
+	}
+}
+
 function synchyInstallerCurrentSiteUrl(): string
 {
 	$host = $_SERVER['HTTP_X_ORIGINAL_HOST'] ?? $_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? 'localhost';
@@ -839,18 +848,12 @@ function synchyInstallerForceCoreUrls(mysqli $connection, string $prefix, string
 	$messages[] = 'Forced home and siteurl to ' . $destinationUrl . '.';
 }
 
-function synchyInstallerUpdateWpConfig(string $wordpressRoot, array $config, array &$messages): void
+function synchyInstallerBuildWpConfigContents(string $templatePath, array $config): string
 {
-	$config_path = synchyInstallerPath($wordpressRoot, 'wp-config.php');
-
-	if (!is_readable($config_path) || !is_writable($config_path)) {
-		throw new RuntimeException('wp-config.php is not writable, so Synchy cannot update the destination database credentials.');
-	}
-
-	$contents = (string) file_get_contents($config_path);
+	$contents = (string) file_get_contents($templatePath);
 
 	if ($contents === '') {
-		throw new RuntimeException('Could not read wp-config.php before updating the destination database credentials.');
+		throw new RuntimeException('Could not read the wp-config template before updating the destination database credentials.');
 	}
 
 	$replacements = [
@@ -867,7 +870,7 @@ function synchyInstallerUpdateWpConfig(string $wordpressRoot, array $config, arr
 		$contents = (string) preg_replace($pattern, $replacement, $contents, 1, $count);
 
 		if ($count !== 1) {
-			throw new RuntimeException('Could not update ' . $constant . ' in wp-config.php. Synchy expects standard WordPress constant definitions.');
+			throw new RuntimeException('Could not update ' . $constant . ' in the wp-config template. Synchy expects standard WordPress constant definitions.');
 		}
 	}
 
@@ -877,21 +880,94 @@ function synchyInstallerUpdateWpConfig(string $wordpressRoot, array $config, arr
 	$contents = (string) preg_replace($prefix_pattern, $prefix_replacement, $contents, 1, $prefix_count);
 
 	if ($prefix_count !== 1) {
-		throw new RuntimeException('Could not update $table_prefix in wp-config.php.');
+		throw new RuntimeException('Could not update $table_prefix in the wp-config template.');
 	}
 
-	$backup_path = $config_path . '.synchy-' . date('Ymd-His') . '.bak';
+	foreach (['WP_HOME', 'WP_SITEURL'] as $constant) {
+		$contents = (string) preg_replace(
+			"/^\\s*define\\(\\s*['\\\"]" . preg_quote($constant, '/') . "['\\\"]\\s*,\\s*[^\\r\\n]+\\);\\s*$/m",
+			'',
+			$contents
+		);
+	}
 
-	if (!@copy($config_path, $backup_path)) {
-		throw new RuntimeException('Could not create a backup of wp-config.php before updating it.');
+	foreach (['AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT'] as $constant) {
+		$pattern = "/define\\(\\s*['\\\"]" . preg_quote($constant, '/') . "['\\\"]\\s*,\\s*['\\\"]put your unique phrase here['\\\"]\\s*\\);/";
+		$contents = (string) preg_replace(
+			$pattern,
+			"define('" . $constant . "', " . synchyInstallerPhpStringLiteral(synchyInstallerGenerateSecret()) . ');',
+			$contents
+		);
+	}
+
+	return $contents;
+}
+
+function synchyInstallerResolveWpConfigTemplate(string $wordpressRoot, string $extractDirectory): array
+{
+	$destination_config = synchyInstallerPath($wordpressRoot, 'wp-config.php');
+	$sample_template = synchyInstallerPath($extractDirectory, 'wp-config-sample.php');
+	$package_template = synchyInstallerPath($extractDirectory, 'wp-config.php');
+
+	if (is_readable($destination_config)) {
+		return [
+			'path' => $destination_config,
+			'mode' => 'update',
+		];
+	}
+
+	if (is_readable($sample_template)) {
+		return [
+			'path' => $sample_template,
+			'mode' => 'create',
+		];
+	}
+
+	if (is_readable($package_template)) {
+		return [
+			'path' => $package_template,
+			'mode' => 'create',
+		];
+	}
+
+	throw new RuntimeException('Synchy could not find a wp-config template in the package. The archive must include wp-config.php or wp-config-sample.php.');
+}
+
+function synchyInstallerUpdateWpConfig(string $wordpressRoot, string $extractDirectory, array $config, array &$messages): void
+{
+	$config_path = synchyInstallerPath($wordpressRoot, 'wp-config.php');
+	$template = synchyInstallerResolveWpConfigTemplate($wordpressRoot, $extractDirectory);
+	$contents = synchyInstallerBuildWpConfigContents((string) $template['path'], $config);
+
+	if (($template['mode'] ?? '') === 'update') {
+		if (!is_writable($config_path)) {
+			throw new RuntimeException('wp-config.php is not writable, so Synchy cannot update the destination database credentials.');
+		}
+
+		$backup_path = $config_path . '.synchy-' . date('Ymd-His') . '.bak';
+
+		if (!@copy($config_path, $backup_path)) {
+			throw new RuntimeException('Could not create a backup of wp-config.php before updating it.');
+		}
+
+		if (@file_put_contents($config_path, $contents, LOCK_EX) === false) {
+			throw new RuntimeException('Could not write the updated database credentials into wp-config.php.');
+		}
+
+		$messages[] = 'Updated wp-config.php to use database ' . $config['name'] . ' at ' . $config['host'] . ' (prefix ' . $config['prefix'] . ').';
+		$messages[] = 'Created a wp-config.php backup at ' . $backup_path . '.';
+		return;
+	}
+
+	if (!is_writable($wordpressRoot)) {
+		throw new RuntimeException('The destination folder is not writable, so Synchy cannot create wp-config.php there.');
 	}
 
 	if (@file_put_contents($config_path, $contents, LOCK_EX) === false) {
-		throw new RuntimeException('Could not write the updated database credentials into wp-config.php.');
+		throw new RuntimeException('Could not create wp-config.php in the destination folder.');
 	}
 
-	$messages[] = 'Updated wp-config.php to use database ' . $config['name'] . ' at ' . $config['host'] . ' (prefix ' . $config['prefix'] . ').';
-	$messages[] = 'Created a wp-config.php backup at ' . $backup_path . '.';
+	$messages[] = 'Created wp-config.php in the destination folder using database ' . $config['name'] . ' at ' . $config['host'] . ' (prefix ' . $config['prefix'] . ').';
 }
 
 function synchyInstallerCopyFiles(string $extractDirectory, string $wordpressRoot, array &$messages, array &$warnings): void
@@ -979,14 +1055,6 @@ if ($archive_path === '') {
 	$errors[] = 'Archive size mismatch detected. Expected ' . synchyInstallerReadableSize($expected_archive_size) . ' but found ' . synchyInstallerReadableSize($actual_archive_size) . '.';
 }
 
-if ($wordpress_root === '') {
-	$errors[] = 'Could not detect the WordPress root above this installer location.';
-}
-
-if ($wordpress_root !== '' && !synchyInstallerIsWordPressRoot($wordpress_root)) {
-	$errors[] = 'This installer must live in the exact destination WordPress root. Move installer.php and the package zip into the target site root that already contains wp-config.php and wp-admin, then reload this page.';
-}
-
 if (!function_exists('mysqli_init')) {
 	$errors[] = 'MySQLi is not available on this server, so the installer cannot connect to the destination database directly.';
 }
@@ -1072,7 +1140,7 @@ if ($request_method === 'POST') {
 			}
 
 			synchyInstallerForceCoreUrls($connection, $database_config['prefix'], $destination_url, $messages);
-			synchyInstallerUpdateWpConfig($wordpress_root, $database_config, $messages);
+			synchyInstallerUpdateWpConfig($wordpress_root, $extract_directory, $database_config, $messages);
 			$connection->close();
 			$connection = null;
 			synchyInstallerCopyFiles($extract_directory, $wordpress_root, $messages, $warnings);
