@@ -291,6 +291,19 @@
 	margin-top: 18px;
 }
 
+.synchy-stage-status {
+	margin-top: 18px;
+}
+
+.synchy-stage-status__label {
+	margin: 0 0 10px !important;
+	color: #12323b !important;
+	font-size: 13px !important;
+	font-weight: 700 !important;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
 .synchy-export-stage {
 	display: flex;
 	align-items: flex-start;

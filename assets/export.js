@@ -45,7 +45,7 @@
 
 	const slugifyPackageName = (value) => {
 		const trimmed = value.trim();
-		const fallback = "synchy-export";
+		const fallback = String(config.defaultPackageName || "synchy-export");
 		const withoutExt = trimmed.replace(/\.(zip|php|json)$/gi, "");
 		const slug = withoutExt
 			.replace(/[^A-Za-z0-9._ -]+/g, "-")
