@@ -37,7 +37,6 @@
 	let titleFlashTimer = null;
 	let titleFlashState = false;
 	let pendingReloadOnFocus = false;
-	let notificationRequested = false;
 	const originalTitle = document.title;
 
 	const escapeHtml = (value) =>
@@ -88,40 +87,12 @@
 		}, 1000);
 	};
 
-	const requestNotificationPermission = () => {
-		if (!("Notification" in window) || notificationRequested || Notification.permission !== "default") {
-			return;
-		}
-
-		notificationRequested = true;
-		Notification.requestPermission().catch(() => {});
-	};
-
-	const notifyCompletionState = (title, body) => {
+	const notifyCompletionState = (title) => {
 		if (!document.hidden && document.hasFocus()) {
 			return;
 		}
 
 		startTitleAttention(title);
-
-		if (!("Notification" in window) || Notification.permission !== "granted") {
-			return;
-		}
-
-		try {
-			const notice = new Notification(title, {
-				body,
-				tag: "synchy-export-status",
-				renotify: true,
-			});
-
-			notice.onclick = () => {
-				window.focus();
-				notice.close();
-			};
-		} catch (error) {
-			// Ignore notification API failures and rely on the flashing tab title.
-		}
 	};
 
 	const handleWindowFocus = () => {
@@ -273,10 +244,7 @@
 
 			if (currentJob.status === "complete") {
 				setRunningState(false);
-				notifyCompletionState(
-					config.strings.completeTitle,
-					currentJob.message || config.strings.completeBody
-				);
+				notifyCompletionState(config.strings.completeTitle);
 
 				if (document.hidden || !document.hasFocus()) {
 					pendingReloadOnFocus = true;
@@ -291,7 +259,7 @@
 			if (progressMessage) {
 				progressMessage.textContent = error.message;
 			}
-			notifyCompletionState(config.strings.errorTitle, error.message);
+			notifyCompletionState(config.strings.errorTitle);
 			setRunningState(false);
 		}
 	};
@@ -370,7 +338,6 @@
 
 	runButton.addEventListener("click", async () => {
 		try {
-			requestNotificationPermission();
 			setRunningState(true);
 			renderProgress({
 				phaseLabel: config.strings.preparingLabel,
@@ -392,7 +359,7 @@
 				fileCursor: 0,
 				fileCount: 0,
 			});
-			notifyCompletionState(config.strings.errorTitle, error.message);
+			notifyCompletionState(config.strings.errorTitle);
 			setRunningState(false);
 		}
 	});
