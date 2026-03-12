@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.3
+ * Version: 0.7.4
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.3';
+const SYNCHY_VERSION = '0.7.4';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -2276,12 +2276,97 @@ function synchy_export_phase_label(string $phase): string
 	};
 }
 
+function synchy_get_export_stage_definitions(): array
+{
+	return [
+		'queued' => [
+			'label' => __('Prepare Job', 'synchy'),
+			'description' => __('Set up the temporary workspace and package files.', 'synchy'),
+		],
+		'dumping_database' => [
+			'label' => __('Export Database', 'synchy'),
+			'description' => __('Write the SQL dump that goes inside the package.', 'synchy'),
+		],
+		'scanning_files' => [
+			'label' => __('Scan Files', 'synchy'),
+			'description' => __('Index the WordPress files that belong in the export.', 'synchy'),
+		],
+		'zipping_files' => [
+			'label' => __('Build Archive', 'synchy'),
+			'description' => __('Add the database dump and site files into the zip archive.', 'synchy'),
+		],
+		'finalizing' => [
+			'label' => __('Write Installer', 'synchy'),
+			'description' => __('Generate installer.php and the manifest for this package.', 'synchy'),
+		],
+		'complete' => [
+			'label' => __('Export Ready', 'synchy'),
+			'description' => __('The package is complete and ready to download.', 'synchy'),
+		],
+	];
+}
+
+function synchy_get_export_stage_order(): array
+{
+	return array_keys(synchy_get_export_stage_definitions());
+}
+
+function synchy_get_export_stage_index(string $phase): int
+{
+	$order = synchy_get_export_stage_order();
+	$index = array_search($phase, $order, true);
+
+	return $index === false ? -1 : (int) $index;
+}
+
+function synchy_get_export_stage_items(array $job): array
+{
+	$definitions = synchy_get_export_stage_definitions();
+	$status = (string) ($job['status'] ?? '');
+	$phase = (string) ($job['phase'] ?? '');
+	$active_phase = $status === 'error' ? (string) ($job['last_phase'] ?? '') : $phase;
+	$active_index = synchy_get_export_stage_index($active_phase);
+	$items = [];
+
+	foreach ($definitions as $stage_key => $definition) {
+		$index = synchy_get_export_stage_index($stage_key);
+		$state = 'pending';
+
+		if ($status === 'complete') {
+			$state = 'complete';
+		} elseif ($status === 'error') {
+			if ($active_index >= 0 && $index < $active_index) {
+				$state = 'complete';
+			} elseif ($active_index >= 0 && $index === $active_index) {
+				$state = 'error';
+			}
+		} elseif ($status === 'running') {
+			if ($active_index >= 0 && $index < $active_index) {
+				$state = 'complete';
+			} elseif ($active_index >= 0 && $index === $active_index) {
+				$state = 'active';
+			}
+		}
+
+		$items[] = [
+			'key' => $stage_key,
+			'label' => (string) $definition['label'],
+			'description' => (string) $definition['description'],
+			'state' => $state,
+		];
+	}
+
+	return $items;
+}
+
 function synchy_build_job_response(array $job): array
 {
 	if ($job === []) {
-		return [];
+		return [
+			'stages' => synchy_get_export_stage_items([]),
+		];
 	}
-
+	
 	return [
 		'id' => (string) ($job['job_id'] ?? ''),
 		'packageId' => (string) ($job['package_id'] ?? ''),
@@ -2296,6 +2381,7 @@ function synchy_build_job_response(array $job): array
 		'fileBytes' => (int) ($job['file_bytes'] ?? 0),
 		'outputDirectory' => (string) ($job['output_directory'] ?? ''),
 		'artifactNames' => $job['artifact_names'] ?? [],
+		'stages' => synchy_get_export_stage_items($job),
 	];
 }
 
@@ -2375,6 +2461,10 @@ function synchy_build_site_sync_job_response(array $job): array
 
 function synchy_mark_export_job_error(array $job, string $message): array
 {
+	if (($job['phase'] ?? '') !== 'error') {
+		$job['last_phase'] = (string) ($job['phase'] ?? '');
+	}
+
 	$job['status'] = 'error';
 	$job['phase'] = 'error';
 	$job['message'] = $message;
@@ -4619,15 +4709,27 @@ function synchy_render_export_page(array $current): void
 							</p>
 						</div>
 
-						<div class="synchy-package">
-							<div><code data-synchy-archive-preview><?php echo esc_html($archive_preview); ?></code></div>
-							<div><code data-synchy-installer-preview><?php echo esc_html($installer_preview); ?></code></div>
-							<div><code data-synchy-manifest-preview><?php echo esc_html($manifest_preview); ?></code></div>
-						</div>
+							<div class="synchy-package">
+								<div><code data-synchy-archive-preview><?php echo esc_html($archive_preview); ?></code></div>
+								<div><code data-synchy-installer-preview><?php echo esc_html($installer_preview); ?></code></div>
+								<div><code data-synchy-manifest-preview><?php echo esc_html($manifest_preview); ?></code></div>
+							</div>
 
-						<div class="synchy-progress<?php echo $running_job === [] ? ' is-hidden' : ''; ?>" data-synchy-progress>
-							<div class="synchy-progress__top">
-								<strong data-synchy-progress-phase><?php echo esc_html(synchy_export_phase_label((string) ($running_job['phase'] ?? 'queued'))); ?></strong>
+							<div class="synchy-export-stages" data-synchy-export-stages>
+								<?php foreach (synchy_get_export_stage_items($running_job) as $stage) : ?>
+									<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
+										<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
+										<div class="synchy-export-stage__content">
+											<strong><?php echo esc_html((string) $stage['label']); ?></strong>
+											<span><?php echo esc_html((string) $stage['description']); ?></span>
+										</div>
+									</div>
+								<?php endforeach; ?>
+							</div>
+
+							<div class="synchy-progress<?php echo $running_job === [] ? ' is-hidden' : ''; ?>" data-synchy-progress>
+								<div class="synchy-progress__top">
+									<strong data-synchy-progress-phase><?php echo esc_html(synchy_export_phase_label((string) ($running_job['phase'] ?? 'queued'))); ?></strong>
 								<span data-synchy-progress-percent><?php echo esc_html((string) (int) ($running_job['progress'] ?? 0)); ?>%</span>
 							</div>
 							<div class="synchy-progress__bar">
@@ -5966,6 +6068,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 			'ajaxUrl' => admin_url('admin-ajax.php'),
 			'nonce' => wp_create_nonce('synchy_export_ajax'),
 			'currentJob' => synchy_build_job_response(synchy_get_running_export_job()),
+			'defaultStages' => synchy_get_export_stage_items([]),
 			'strings' => [
 				'filesProcessed' => __('Files processed:', 'synchy'),
 				'unknownError' => __('Synchy hit an unexpected error while exporting.', 'synchy'),

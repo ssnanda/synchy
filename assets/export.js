@@ -13,6 +13,7 @@
 	const progressPercent = document.querySelector("[data-synchy-progress-percent]");
 	const progressMessage = document.querySelector("[data-synchy-progress-message]");
 	const progressDetail = document.querySelector("[data-synchy-progress-detail]");
+	const stages = document.querySelector("[data-synchy-export-stages]");
 	const packageNameInput = document.querySelector("[data-synchy-package-name]");
 	const outputDirectoryInput = document.querySelector("[data-synchy-output-directory]");
 	const defaultPathButton = document.querySelector("[data-synchy-use-default]");
@@ -33,6 +34,14 @@
 
 	let currentJob = config.currentJob || null;
 	let currentBrowsePath = outputDirectoryInput.value || "./";
+
+	const escapeHtml = (value) =>
+		String(value)
+			.replace(/&/g, "&amp;")
+			.replace(/</g, "&lt;")
+			.replace(/>/g, "&gt;")
+			.replace(/"/g, "&quot;")
+			.replace(/'/g, "&#039;");
 
 	const slugifyPackageName = (value) => {
 		const trimmed = value.trim();
@@ -80,6 +89,28 @@
 		progressDetail.textContent = `${config.strings.filesProcessed} ${processed} / ${total}`;
 	};
 
+	const renderStages = (job) => {
+		if (!stages) {
+			return;
+		}
+
+		const items = Array.isArray(job && job.stages) ? job.stages : Array.isArray(config.defaultStages) ? config.defaultStages : [];
+
+		stages.innerHTML = items
+			.map(
+				(stage) => `
+					<div class="synchy-export-stage is-${escapeHtml(stage.state || "pending")}">
+						<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
+						<div class="synchy-export-stage__content">
+							<strong>${escapeHtml(stage.label || "")}</strong>
+							<span>${escapeHtml(stage.description || "")}</span>
+						</div>
+					</div>
+				`
+			)
+			.join("");
+	};
+
 	const renderProgress = (job) => {
 		if (!progress || !job) {
 			return;
@@ -103,6 +134,7 @@
 			progressMessage.textContent = job.message || "";
 		}
 
+		renderStages(job);
 		setProgressDetail(job);
 	};
 
@@ -236,6 +268,7 @@
 	};
 
 	updatePackagePreview();
+	renderStages(currentJob);
 
 	packageNameInput.addEventListener("input", updatePackagePreview);
 
