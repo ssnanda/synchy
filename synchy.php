@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.7
+ * Version: 0.7.8
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.7';
+const SYNCHY_VERSION = '0.7.8';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -1586,6 +1586,120 @@ function synchy_is_export_record_available(array $record): bool
 	return synchy_is_export_artifact_readable($archive);
 }
 
+function synchy_build_export_history_entry_from_manifest_path(string $manifest_path): array
+{
+	$manifest_path = wp_normalize_path($manifest_path);
+
+	if (!is_readable($manifest_path)) {
+		return [];
+	}
+
+	$contents = file_get_contents($manifest_path);
+
+	if ($contents === false) {
+		return [];
+	}
+
+	$manifest = json_decode($contents, true);
+
+	if (!is_array($manifest) || empty($manifest['package_id'])) {
+		return [];
+	}
+
+	$directory = wp_normalize_path(dirname($manifest_path));
+	$archive_filename = sanitize_file_name((string) ($manifest['artifacts']['archive']['filename'] ?? ''));
+	$installer_filename = sanitize_file_name((string) ($manifest['artifacts']['installer']['filename'] ?? ''));
+	$manifest_filename = sanitize_file_name((string) ($manifest['artifacts']['manifest']['filename'] ?? basename($manifest_path)));
+	$archive_path = $archive_filename !== '' ? wp_normalize_path(trailingslashit($directory) . $archive_filename) : '';
+	$installer_path = $installer_filename !== '' ? wp_normalize_path(trailingslashit($directory) . $installer_filename) : '';
+	$resolved_manifest_path = $manifest_filename !== '' ? wp_normalize_path(trailingslashit($directory) . $manifest_filename) : $manifest_path;
+
+	return [
+		'package_id' => (string) $manifest['package_id'],
+		'package_name' => (string) ($manifest['package_name'] ?? $manifest['package_id']),
+		'created_at' => (string) ($manifest['created_at_gmt'] ?? ''),
+		'output_directory' => (string) ($manifest['output_directory'] ?? synchy_display_output_directory($directory)),
+		'archive_size' => is_readable($archive_path)
+			? (int) filesize($archive_path)
+			: (int) ($manifest['artifacts']['archive']['size_bytes'] ?? 0),
+		'file_count' => (int) ($manifest['files']['included_count'] ?? 0),
+		'file_bytes' => (int) ($manifest['files']['included_bytes'] ?? 0),
+		'table_count' => (int) ($manifest['database']['tables'] ?? 0),
+		'artifacts' => [
+			'archive' => [
+				'label' => __('Download archive', 'synchy'),
+				'filename' => $archive_filename,
+				'path' => $archive_path,
+			],
+			'installer' => [
+				'label' => __('Download installer', 'synchy'),
+				'filename' => $installer_filename,
+				'path' => $installer_path,
+			],
+			'manifest' => [
+				'label' => __('Download manifest', 'synchy'),
+				'filename' => $manifest_filename,
+				'path' => $resolved_manifest_path,
+			],
+		],
+	];
+}
+
+function synchy_discover_export_history_from_directory(string $directory): array
+{
+	$directory = wp_normalize_path(untrailingslashit($directory));
+
+	if ($directory === '' || !is_dir($directory) || !is_readable($directory)) {
+		return [];
+	}
+
+	$matches = glob($directory . '/*-manifest.json') ?: [];
+	$history = [];
+
+	foreach ($matches as $manifest_path) {
+		$entry = synchy_build_export_history_entry_from_manifest_path((string) $manifest_path);
+
+		if ($entry !== []) {
+			$history[] = $entry;
+		}
+	}
+
+	usort(
+		$history,
+		static function (array $a, array $b): int {
+			return strcmp((string) ($b['created_at'] ?? ''), (string) ($a['created_at'] ?? ''));
+		}
+	);
+
+	return $history;
+}
+
+function synchy_discover_export_history(): array
+{
+	$options = synchy_get_export_options();
+	$directories = [];
+	$current_output = synchy_resolve_output_directory_path((string) ($options['output_directory'] ?? ''));
+
+	if ($current_output !== '') {
+		$directories[] = $current_output;
+	}
+
+	$last_export = synchy_get_last_export();
+	$last_output = trim((string) ($last_export['output_directory'] ?? ''));
+
+	if ($last_output !== '') {
+		$directories[] = synchy_resolve_output_directory_path($last_output);
+	}
+
+	$history = [];
+
+	foreach (array_values(array_unique(array_filter($directories))) as $directory) {
+		$history = array_merge($history, synchy_discover_export_history_from_directory((string) $directory));
+	}
+
+	return $history;
+}
+
 function synchy_update_export_history(array $history): array
 {
 	$history = array_values($history);
@@ -1612,6 +1726,13 @@ function synchy_get_export_history(): array
 	if ($last_export !== [] && !synchy_export_history_contains_package($history, (string) ($last_export['package_id'] ?? ''))) {
 		array_unshift($history, $last_export);
 		$changed = true;
+	}
+
+	foreach (synchy_discover_export_history() as $entry) {
+		if (!synchy_export_history_contains_package($history, (string) ($entry['package_id'] ?? ''))) {
+			$history[] = $entry;
+			$changed = true;
+		}
 	}
 
 	$normalized = [];
