@@ -11,6 +11,13 @@
 	const previewButton = document.querySelector("[data-synchy-preview-sync]");
 	const runButton = document.querySelector("[data-synchy-run-sync]");
 	const manualBaselineButton = document.querySelector("[data-synchy-mark-baseline]");
+	const progress = document.querySelector("[data-synchy-sync-progress]");
+	const progressBar = document.querySelector("[data-synchy-sync-progress-bar]");
+	const progressPhase = document.querySelector("[data-synchy-sync-progress-phase]");
+	const progressPercent = document.querySelector("[data-synchy-sync-progress-percent]");
+	const progressMessage = document.querySelector("[data-synchy-sync-progress-message]");
+	const progressDetail = document.querySelector("[data-synchy-sync-progress-detail]");
+	const stages = document.querySelector("[data-synchy-sync-stages]");
 	const connectionPanel = document.querySelector("[data-synchy-sync-connection-result]");
 	const connectionBadge = document.querySelector("[data-synchy-sync-connection-badge]");
 	const connectionMessage = document.querySelector("[data-synchy-sync-connection-message]");
@@ -45,6 +52,7 @@
 	let latestPreview = null;
 	let busy = false;
 	let pendingBaselineScopeIds = new Set((config.scopeStatus?.pendingBaselineScopeIds || []).map(String));
+	let currentJob = config.currentJob || null;
 
 	const escapeHtml = (value) =>
 		String(value)
@@ -132,6 +140,64 @@
 					`<div><span class="synchy-export-meta__label">${escapeHtml(item.label)}</span><strong>${item.html ? item.value : escapeHtml(item.value)}</strong></div>`
 			)
 			.join("");
+	};
+
+	const renderStages = (job) => {
+		if (!stages) {
+			return;
+		}
+
+		const items = Array.isArray(job?.stages) ? job.stages : Array.isArray(config.defaultStages) ? config.defaultStages : [];
+
+		stages.innerHTML = items
+			.map(
+				(stage) => `
+					<div class="synchy-export-stage is-${escapeHtml(stage.state || "pending")}">
+						<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
+						<div class="synchy-export-stage__content">
+							<strong>${escapeHtml(stage.label || "")}</strong>
+							<span>${escapeHtml(stage.description || "")}</span>
+						</div>
+					</div>
+				`
+			)
+			.join("");
+	};
+
+	const renderProgress = (job) => {
+		if (!progress) {
+			return;
+		}
+
+		if (!job || !job.status) {
+			progress.classList.add("is-hidden");
+			renderStages(null);
+			return;
+		}
+
+		progress.classList.remove("is-hidden");
+
+		if (progressBar) {
+			progressBar.style.width = `${job.progress || 0}%`;
+		}
+
+		if (progressPhase) {
+			progressPhase.textContent = job.phaseLabel || (config.strings.syncRunning || "Sync running");
+		}
+
+		if (progressPercent) {
+			progressPercent.textContent = `${job.progress || 0}%`;
+		}
+
+		if (progressMessage) {
+			progressMessage.textContent = job.message || "";
+		}
+
+		if (progressDetail) {
+			progressDetail.textContent = `${config.strings.selectedChanges || "Selected changes"}: ${Number(job.filesCount || 0).toLocaleString()} files, ${Number(job.dbRows || 0).toLocaleString()} DB rows`;
+		}
+
+		renderStages(job);
 	};
 
 	const getSelectedScopeIds = () =>
@@ -484,6 +550,27 @@
 		return payload.data || {};
 	};
 
+	const pollSyncJob = async () => {
+		if (!busy) {
+			return;
+		}
+
+		try {
+			const data = await sendAjax("synchy_get_sync_job_status");
+			currentJob = data.job || null;
+			renderProgress(currentJob);
+
+			if (currentJob && currentJob.status === "running") {
+				window.setTimeout(pollSyncJob, 250);
+				return;
+			}
+		} catch (error) {
+			if (busy) {
+				window.setTimeout(pollSyncJob, 500);
+			}
+		}
+	};
+
 	const requireSelection = () => {
 		if (getHasSelection()) {
 			return true;
@@ -598,11 +685,25 @@
 		}
 
 		setBusy(true);
+		currentJob = {
+			status: "running",
+			phase: "building_package",
+			phaseLabel: config.strings.syncRunning || "Sync running",
+			progress: 5,
+			message: "Starting Sync...",
+			filesCount: Number(latestPreview?.filesCount || 0),
+			dbRows: Number(latestPreview?.dbRows || 0),
+			stages: Array.isArray(config.defaultStages) ? config.defaultStages : [],
+		};
+		renderProgress(currentJob);
+		window.setTimeout(pollSyncJob, 100);
 		statusBadge.textContent = config.strings.syncingAction || "Syncing...";
 		statusMessage.textContent = "Sync is running. Keep this tab open until it finishes.";
 
 		try {
 			const data = await sendAjax("synchy_run_sync_changes");
+			currentJob = data.job || null;
+			renderProgress(currentJob);
 			renderStatus(data.status || {});
 			applyScopeStatus(data.scopeStatus || null);
 			clearPreview();
@@ -652,4 +753,5 @@
 	updateTargetNote();
 	updateScopeCards();
 	updateActionButtons();
+	renderProgress(currentJob);
 })();

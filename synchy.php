@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.27
+ * Version: 0.7.28
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.27';
+const SYNCHY_VERSION = '0.7.28';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -22,6 +22,7 @@ const SYNCHY_SITE_SYNC_OPTIONS = 'synchy_site_sync_options';
 const SYNCHY_SITE_SYNC_JOB_OPTION = 'synchy_site_sync_job';
 const SYNCHY_SYNC_LAST_TIME_OPTION = 'syncy_last_sync_time';
 const SYNCHY_SYNC_STATUS_OPTION = 'synchy_sync_status';
+const SYNCHY_SYNC_JOB_OPTION = 'synchy_sync_job';
 const SYNCHY_IMPORT_OPTIONS = 'synchy_import_options';
 const SYNCHY_IMPORT_RESULT_OPTION = 'synchy_import_result';
 const SYNCHY_NOTICE_PREFIX = 'synchy_admin_notice_';
@@ -932,6 +933,177 @@ function synchy_set_sync_status(array $status): void
 	update_option(SYNCHY_SYNC_STATUS_OPTION, $status, false);
 }
 
+function synchy_sync_phase_label(string $phase): string
+{
+	return match ($phase) {
+		'building_package' => __('Building Sync Package', 'synchy'),
+		'sending_package' => __('Sending Package', 'synchy'),
+		'applying_destination' => __('Applying on Destination', 'synchy'),
+		'finalizing' => __('Finalizing Sync', 'synchy'),
+		'complete' => __('Complete', 'synchy'),
+		'error' => __('Error', 'synchy'),
+		default => __('Preparing Sync', 'synchy'),
+	};
+}
+
+function synchy_get_sync_stage_definitions(): array
+{
+	return [
+		'building_package' => [
+			'label' => __('Build Delta Package', 'synchy'),
+			'description' => __('Calculate the selected file and database changes and package them for delivery.', 'synchy'),
+		],
+		'sending_package' => [
+			'label' => __('Send Package', 'synchy'),
+			'description' => __('Upload the selected delta package to the configured destination site.', 'synchy'),
+		],
+		'applying_destination' => [
+			'label' => __('Apply on Destination', 'synchy'),
+			'description' => __('Wait for the destination site to apply the incoming files and database rows.', 'synchy'),
+		],
+		'finalizing' => [
+			'label' => __('Finalize State', 'synchy'),
+			'description' => __('Store the new Sync baseline and update the final run summary.', 'synchy'),
+		],
+		'complete' => [
+			'label' => __('Done', 'synchy'),
+			'description' => __('The selected Sync changes have finished processing.', 'synchy'),
+		],
+	];
+}
+
+function synchy_get_sync_stage_order(): array
+{
+	return array_keys(synchy_get_sync_stage_definitions());
+}
+
+function synchy_get_sync_stage_index(string $phase): int
+{
+	$order = synchy_get_sync_stage_order();
+	$index = array_search($phase, $order, true);
+
+	return $index === false ? -1 : (int) $index;
+}
+
+function synchy_get_sync_stage_items(array $job): array
+{
+	$definitions = synchy_get_sync_stage_definitions();
+	$status = (string) ($job['status'] ?? '');
+	$phase = (string) ($job['phase'] ?? '');
+	$active_phase = $status === 'error' ? (string) ($job['last_phase'] ?? '') : $phase;
+	$active_index = synchy_get_sync_stage_index($active_phase);
+	$items = [];
+
+	foreach ($definitions as $stage_key => $definition) {
+		$index = synchy_get_sync_stage_index($stage_key);
+		$state = 'pending';
+
+		if ($status === 'complete') {
+			$state = 'complete';
+		} elseif ($status === 'error') {
+			if ($active_index >= 0 && $index < $active_index) {
+				$state = 'complete';
+			} elseif ($active_index >= 0 && $index === $active_index) {
+				$state = 'error';
+			}
+		} elseif ($status === 'running') {
+			if ($active_index >= 0 && $index < $active_index) {
+				$state = 'complete';
+			} elseif ($active_index >= 0 && $index === $active_index) {
+				$state = 'active';
+			}
+		}
+
+		$items[] = [
+			'key' => $stage_key,
+			'label' => (string) $definition['label'],
+			'description' => (string) $definition['description'],
+			'state' => $state,
+		];
+	}
+
+	return $items;
+}
+
+function synchy_update_sync_job(array $job): array
+{
+	update_option(SYNCHY_SYNC_JOB_OPTION, $job, false);
+
+	return $job;
+}
+
+function synchy_get_sync_job(): array
+{
+	$value = get_option(SYNCHY_SYNC_JOB_OPTION, []);
+
+	return is_array($value) ? $value : [];
+}
+
+function synchy_get_running_sync_job(): array
+{
+	$job = synchy_get_sync_job();
+
+	if (($job['status'] ?? '') !== 'running') {
+		return [];
+	}
+
+	return $job;
+}
+
+function synchy_build_sync_job_response(array $job): array
+{
+	if ($job === []) {
+		return [
+			'stages' => synchy_get_sync_stage_items([]),
+		];
+	}
+
+	return [
+		'id' => (string) ($job['job_id'] ?? ''),
+		'status' => (string) ($job['status'] ?? ''),
+		'phase' => (string) ($job['phase'] ?? ''),
+		'phaseLabel' => synchy_sync_phase_label((string) ($job['phase'] ?? '')),
+		'message' => (string) ($job['message'] ?? ''),
+		'progress' => (int) round((float) ($job['progress'] ?? 0)),
+		'createdAt' => (string) ($job['created_at'] ?? ''),
+		'destinationUrl' => (string) ($job['destination_url'] ?? ''),
+		'filesCount' => (int) ($job['files_count'] ?? 0),
+		'dbRows' => (int) ($job['db_rows'] ?? 0),
+		'selectedScopeLabels' => array_values(array_filter((array) ($job['selected_scope_labels'] ?? []), 'is_string')),
+		'stages' => synchy_get_sync_stage_items($job),
+	];
+}
+
+function synchy_start_sync_job(array $options): array
+{
+	return synchy_update_sync_job([
+		'job_id' => wp_generate_uuid4(),
+		'status' => 'running',
+		'phase' => 'building_package',
+		'progress' => 10,
+		'message' => __('Reviewing the selected scopes and building the Sync package.', 'synchy'),
+		'created_at' => gmdate('c'),
+		'destination_url' => (string) ($options['destination_url'] ?? ''),
+		'selected_scope_labels' => synchy_get_sync_scope_labels(synchy_get_selected_sync_scope_ids($options)),
+		'files_count' => 0,
+		'db_rows' => 0,
+	]);
+}
+
+function synchy_mark_sync_job_error(array $job, string $message): array
+{
+	if (($job['phase'] ?? '') !== 'error') {
+		$job['last_phase'] = (string) ($job['phase'] ?? '');
+	}
+
+	$job['status'] = 'error';
+	$job['phase'] = 'error';
+	$job['message'] = $message;
+	$job['progress'] = 100;
+
+	return synchy_update_sync_job($job);
+}
+
 function synchy_build_sync_manual_baseline_fingerprints(array $selected_scope_ids): array
 {
 	global $wpdb;
@@ -1336,6 +1508,7 @@ function synchy_should_sync_option_name(string $option_name): bool
 		SYNCHY_SITE_SYNC_OPTIONS,
 		SYNCHY_SITE_SYNC_JOB_OPTION,
 		SYNCHY_SYNC_STATUS_OPTION,
+		SYNCHY_SYNC_JOB_OPTION,
 		SYNCHY_SYNC_LAST_TIME_OPTION,
 	];
 
@@ -4564,9 +4737,11 @@ function synchy_run_sync_changes(array $raw_options)
 	}
 
 	$started = microtime(true);
+	$job = synchy_start_sync_job($options);
 	$package = synchy_build_sync_package($options, false, $selection);
 
 	if (is_wp_error($package)) {
+		synchy_mark_sync_job_error($job, $package->get_error_message());
 		synchy_set_sync_status([
 			'status' => 'error',
 			'message' => $package->get_error_message(),
@@ -4577,8 +4752,17 @@ function synchy_run_sync_changes(array $raw_options)
 	}
 
 	$summary = (array) ($package['preview'] ?? []);
+	$job['files_count'] = (int) ($summary['filesCount'] ?? 0);
+	$job['db_rows'] = (int) ($summary['dbRows'] ?? 0);
+	$job['selected_scope_labels'] = (array) ($summary['selectedScopeLabels'] ?? []);
 
 	if (!empty($package['no_changes'])) {
+		$job['status'] = 'complete';
+		$job['phase'] = 'complete';
+		$job['progress'] = 100;
+		$job['message'] = __('No Sync changes were detected for the selected scopes.', 'synchy');
+		synchy_update_sync_job($job);
+
 		$status = [
 			'status' => 'idle',
 			'mode' => (string) ($summary['mode'] ?? 'delta'),
@@ -4598,6 +4782,20 @@ function synchy_run_sync_changes(array $raw_options)
 	}
 
 	$temp_dir = (string) ($package['temp_dir'] ?? '');
+	$job['phase'] = 'sending_package';
+	$job['progress'] = 60;
+	$job['message'] = sprintf(
+		/* translators: 1: file count, 2: db row count */
+		__('Sending %1$d files and %2$d DB rows to the destination site.', 'synchy'),
+		(int) ($summary['filesCount'] ?? 0),
+		(int) ($summary['dbRows'] ?? 0)
+	);
+	synchy_update_sync_job($job);
+
+	$job['phase'] = 'applying_destination';
+	$job['progress'] = 82;
+	$job['message'] = __('Waiting for the destination site to apply the incoming Sync package.', 'synchy');
+	synchy_update_sync_job($job);
 	$remote = synchy_sync_remote_request($options, (string) ($package['zip_path'] ?? ''));
 
 	if ($temp_dir !== '' && is_dir($temp_dir)) {
@@ -4605,6 +4803,7 @@ function synchy_run_sync_changes(array $raw_options)
 	}
 
 	if (is_wp_error($remote)) {
+		synchy_mark_sync_job_error($job, $remote->get_error_message());
 		$status = [
 			'status' => 'error',
 			'mode' => (string) ($summary['mode'] ?? 'delta'),
@@ -4624,6 +4823,10 @@ function synchy_run_sync_changes(array $raw_options)
 	}
 
 	$next_state = isset($package['next_state']) && is_array($package['next_state']) ? $package['next_state'] : [];
+	$job['phase'] = 'finalizing';
+	$job['progress'] = 95;
+	$job['message'] = __('Saving the new Sync baseline and final run summary.', 'synchy');
+	synchy_update_sync_job($job);
 	$next_state['last_result'] = [
 		'mode' => (string) ($summary['mode'] ?? 'delta'),
 		'filesSynced' => (int) ($summary['filesCount'] ?? 0),
@@ -4636,6 +4839,17 @@ function synchy_run_sync_changes(array $raw_options)
 	synchy_set_sync_last_time($sync_time);
 
 	$duration = round(microtime(true) - $started, 2);
+	$job['status'] = 'complete';
+	$job['phase'] = 'complete';
+	$job['progress'] = 100;
+	$job['message'] = sprintf(
+		/* translators: 1: file count, 2: db row count, 3: duration */
+		__('Sync finished: %1$d files and %2$d DB rows in %3$s.', 'synchy'),
+		(int) ($summary['filesCount'] ?? 0),
+		(int) ($summary['dbRows'] ?? 0),
+		synchy_format_sync_duration($duration)
+	);
+	synchy_update_sync_job($job);
 	$status = [
 		'status' => 'success',
 		'mode' => (string) ($summary['mode'] ?? 'delta'),
@@ -6867,6 +7081,8 @@ function synchy_render_schedule_page(array $current): void
 function synchy_render_incremental_site_sync_page(array $current): void
 {
 	$options = synchy_get_site_sync_options();
+	$running_job = synchy_get_running_sync_job();
+	$sync_stage_items = synchy_get_sync_stage_items($running_job);
 	$password_hint = synchy_get_site_sync_password_hint($options);
 	$scope_groups = synchy_get_sync_scope_groups();
 	$scope_status = synchy_get_sync_scope_status($options);
@@ -6901,7 +7117,13 @@ function synchy_render_incremental_site_sync_page(array $current): void
 				</div>
 				<div class="synchy-status">
 					<span class="synchy-status__dot" aria-hidden="true"></span>
-					<?php echo esc_html($scope_status['hasPendingBaseline'] ? __('Baseline ready', 'synchy') : __('Delta ready', 'synchy')); ?>
+					<?php
+					echo esc_html(
+						$running_job !== []
+							? __('Sync running', 'synchy')
+							: ($scope_status['hasPendingBaseline'] ? __('Baseline ready', 'synchy') : __('Delta ready', 'synchy'))
+					);
+					?>
 				</div>
 			</div>
 
@@ -7035,6 +7257,44 @@ function synchy_render_incremental_site_sync_page(array $current): void
 								);
 								?>
 							</p>
+						</div>
+
+						<div class="synchy-progress<?php echo $running_job === [] ? ' is-hidden' : ''; ?>" data-synchy-sync-progress>
+							<div class="synchy-progress__top">
+								<strong data-synchy-sync-progress-phase><?php echo esc_html(synchy_sync_phase_label((string) ($running_job['phase'] ?? ''))); ?></strong>
+								<span data-synchy-sync-progress-percent><?php echo esc_html((string) (int) ($running_job['progress'] ?? 0)); ?>%</span>
+							</div>
+							<div class="synchy-progress__bar">
+								<span data-synchy-sync-progress-bar style="width: <?php echo esc_attr((string) (int) ($running_job['progress'] ?? 0)); ?>%;"></span>
+							</div>
+							<p class="synchy-progress__message" data-synchy-sync-progress-message><?php echo esc_html((string) ($running_job['message'] ?? '')); ?></p>
+							<p class="synchy-progress__detail" data-synchy-sync-progress-detail>
+								<?php
+								if ($running_job !== []) {
+									printf(
+										/* translators: 1: file count, 2: db row count */
+										esc_html__('Selected changes: %1$s files, %2$s DB rows', 'synchy'),
+										esc_html(number_format_i18n((int) ($running_job['files_count'] ?? 0))),
+										esc_html(number_format_i18n((int) ($running_job['db_rows'] ?? 0)))
+									);
+								}
+								?>
+							</p>
+						</div>
+
+						<div class="synchy-stage-status">
+							<p class="synchy-stage-status__label"><?php esc_html_e('Sync Stage Status', 'synchy'); ?></p>
+							<div class="synchy-export-stages" data-synchy-sync-stages>
+								<?php foreach ($sync_stage_items as $stage) : ?>
+									<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
+										<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
+										<div class="synchy-export-stage__content">
+											<strong><?php echo esc_html((string) $stage['label']); ?></strong>
+											<span><?php echo esc_html((string) $stage['description']); ?></span>
+										</div>
+									</div>
+								<?php endforeach; ?>
+							</div>
 						</div>
 					</div>
 					<div class="synchy-stack">
@@ -7631,6 +7891,18 @@ add_action('wp_ajax_synchy_mark_sync_baseline_complete', function (): void {
 	]);
 });
 
+add_action('wp_ajax_synchy_get_sync_job_status', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to view Synchy Sync status.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	wp_send_json_success([
+		'job' => synchy_build_sync_job_response(synchy_get_sync_job()),
+	]);
+});
+
 add_action('wp_ajax_synchy_run_sync_changes', function (): void {
 	if (!current_user_can('manage_options')) {
 		wp_send_json_error(['message' => __('You are not allowed to run Synchy Sync changes.', 'synchy')], 403);
@@ -7647,6 +7919,7 @@ add_action('wp_ajax_synchy_run_sync_changes', function (): void {
 
 	wp_send_json_success([
 		'status' => $result,
+		'job' => synchy_build_sync_job_response(synchy_get_sync_job()),
 		'scopeStatus' => synchy_get_sync_scope_status($options),
 	]);
 });
@@ -8095,6 +8368,8 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 			[
 				'ajaxUrl' => admin_url('admin-ajax.php'),
 				'nonce' => wp_create_nonce('synchy_sync_ajax'),
+				'currentJob' => synchy_build_sync_job_response(synchy_get_running_sync_job()),
+				'defaultStages' => synchy_get_sync_stage_items([]),
 				'scopeStatus' => synchy_get_sync_scope_status(synchy_get_site_sync_options()),
 				'strings' => [
 					'connectionReady' => __('Connection ready', 'synchy'),
@@ -8127,6 +8402,8 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'previewSelectionTitle' => __('Choose What This Sync Sends', 'synchy'),
 					'previewSelectionHelp' => __('Files are selectable by section. Database changes are selectable by table.', 'synchy'),
 					'sampleRowIds' => __('Sample row IDs', 'synchy'),
+					'syncRunning' => __('Sync running', 'synchy'),
+					'selectedChanges' => __('Selected changes', 'synchy'),
 					'tableUpdates' => __('Table updates', 'synchy'),
 					'sampleFiles' => __('Sample files', 'synchy'),
 					'never' => __('Never', 'synchy'),
