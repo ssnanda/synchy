@@ -52,6 +52,7 @@
 	let latestPreview = null;
 	let busy = false;
 	let pendingBaselineScopeIds = new Set((config.scopeStatus?.pendingBaselineScopeIds || []).map(String));
+	let changedScopeIds = new Set();
 	let currentJob = config.currentJob || null;
 
 	const escapeHtml = (value) =>
@@ -248,14 +249,29 @@
 			const status = card?.querySelector(".synchy-scope-card__status");
 			const scopeId = String(input.dataset.scopeId || "");
 			const pending = pendingBaselineScopeIds.has(scopeId);
+			const changed = changedScopeIds.has(scopeId);
 
 			if (!card || !status) {
 				return;
 			}
 
 			card.classList.toggle("is-pending", pending);
-			card.classList.toggle("is-complete", !pending);
-			status.textContent = pending ? "Needs baseline" : "Baseline done";
+			card.classList.toggle("is-complete", !pending && !changed);
+			card.classList.toggle("is-changed", !pending && changed);
+
+			if (pending) {
+				status.textContent = config.strings.needsBaseline || "Needs baseline";
+				return;
+			}
+
+			if (changed) {
+				status.textContent = config.strings.pendingChanges || "Pending changes";
+				return;
+			}
+
+			status.textContent = latestPreview
+				? (config.strings.noChangesInScope || "No changes")
+				: (config.strings.readyForPreview || "Ready for preview");
 		});
 	};
 
@@ -327,6 +343,22 @@
 		const tree = preview?.previewTree || null;
 		const fileGroups = Array.isArray(tree?.fileGroups) ? tree.fileGroups : [];
 		const databaseTables = Array.isArray(tree?.databaseTables) ? tree.databaseTables : [];
+		const nextChangedScopeIds = new Set();
+
+		fileGroups.forEach((group) => {
+			if (group?.id) {
+				nextChangedScopeIds.add(String(group.id));
+			}
+		});
+
+		databaseTables.forEach((table) => {
+			if (table?.scopeId) {
+				nextChangedScopeIds.add(String(table.scopeId));
+			}
+		});
+
+		changedScopeIds = nextChangedScopeIds;
+		updateScopeCards();
 
 		if (fileGroups.length === 0 && databaseTables.length === 0) {
 			previewTreeContainer.innerHTML = "";
@@ -442,6 +474,13 @@
 		const sampleFiles = Array.isArray(preview.filePaths) ? preview.filePaths.slice(0, 8) : [];
 		const selectedScopes = Array.isArray(preview.selectedScopeLabels) ? preview.selectedScopeLabels : [];
 		const pendingScopes = Array.isArray(preview.pendingBaselineLabels) ? preview.pendingBaselineLabels : [];
+		const tree = preview?.previewTree || {};
+		const changedScopeLabels = Array.from(
+			new Set([
+				...(Array.isArray(tree.fileGroups) ? tree.fileGroups.map((group) => String(group?.label || "")).filter(Boolean) : []),
+				...(Array.isArray(tree.databaseTables) ? tree.databaseTables.map((table) => String(table?.scopeLabel || "")).filter(Boolean) : []),
+			])
+		);
 		const tableSummary = Object.entries(tableCounts)
 			.filter((entry) => Number(entry[1] || 0) > 0)
 			.map((entry) => `${escapeHtml(entry[0])} (${escapeHtml(entry[1])})`)
@@ -460,6 +499,7 @@
 			{ label: config.strings.lastSync || "Last successful Sync", value: formatDateTime(preview.lastSyncTime || "") },
 			{ label: "Mode", value: mode },
 			{ label: config.strings.selectedScopes || "Selected scopes", value: selectedScopes.join(", ") || "None" },
+			{ label: config.strings.pendingChanges || "Pending changes", value: changedScopeLabels.join(", ") || "None" },
 			{ label: config.strings.pendingBaseline || "Still need baseline", value: pendingScopes.join(", ") || "None" },
 			{ label: config.strings.files || "Files", value: filesCount.toLocaleString() },
 			{ label: config.strings.dbRows || "DB rows", value: dbRows.toLocaleString() },
@@ -515,7 +555,9 @@
 
 	const clearPreview = () => {
 		latestPreview = null;
+		changedScopeIds = new Set();
 		renderPreview(null);
+		updateScopeCards();
 		updateActionButtons();
 	};
 
@@ -609,7 +651,7 @@
 			applyScopeStatus(data.scopeStatus || null);
 			renderPreview(latestPreview);
 		} catch (error) {
-			latestPreview = null;
+			clearPreview();
 			previewBadge.textContent = config.strings.previewError || "Preview failed";
 			previewMessage.textContent = error.message;
 			renderMeta(previewMeta, []);

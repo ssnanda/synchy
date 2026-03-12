@@ -299,6 +299,15 @@
 	color: #9b5c00;
 }
 
+.synchy-scope-card.is-changed {
+	border-color: #d8c067;
+	background: #fffbea;
+}
+
+.synchy-scope-card.is-changed .synchy-scope-card__status {
+	color: #9b5c00;
+}
+
 .synchy-sync-tree {
 	display: grid;
 	gap: 16px;

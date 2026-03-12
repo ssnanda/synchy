@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.28
+ * Version: 0.7.29
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.28';
+const SYNCHY_VERSION = '0.7.29';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -7220,7 +7220,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 															echo esc_html(
 																in_array((string) $scope_id, $scope_status['pendingBaselineScopeIds'], true)
 																	? __('Needs baseline', 'synchy')
-																	: __('Baseline done', 'synchy')
+																	: __('Ready for preview', 'synchy')
 															);
 															?>
 														</em>
@@ -7231,32 +7231,6 @@ function synchy_render_incremental_site_sync_page(array $current): void
 									</div>
 								<?php endforeach; ?>
 							</div>
-						</div>
-
-						<div class="synchy-run-export">
-							<div class="synchy-input-row">
-								<button type="submit" class="button" data-synchy-save-sync><?php esc_html_e('Save Connection', 'synchy'); ?></button>
-								<button type="button" class="button" data-synchy-test-sync><?php esc_html_e('Test Connection', 'synchy'); ?></button>
-								<button type="button" class="button" data-synchy-preview-sync><?php esc_html_e('Preview Changes', 'synchy'); ?></button>
-								<button type="button" class="button button-primary button-large" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
-								<button
-									type="button"
-									class="button"
-									data-synchy-mark-baseline
-									<?php echo $scope_status['hasPendingBaseline'] ? '' : 'style="display:none"'; ?>
-								>
-									<?php esc_html_e('Mark Manual Baseline Complete', 'synchy'); ?>
-								</button>
-							</div>
-							<p class="synchy-field-note" data-synchy-sync-target-note>
-								<?php
-								printf(
-									/* translators: %s: destination URL */
-									esc_html__('Sync sends changes only to %s.', 'synchy'),
-									esc_html((string) ($options['destination_url'] ?: __('the destination URL above', 'synchy')))
-								);
-								?>
-							</p>
 						</div>
 
 						<div class="synchy-progress<?php echo $running_job === [] ? ' is-hidden' : ''; ?>" data-synchy-sync-progress>
@@ -7354,6 +7328,31 @@ function synchy_render_incremental_site_sync_page(array $current): void
 							<span class="synchy-badge" data-synchy-sync-preview-badge><?php echo esc_html($last_sync_time > 0 ? __('Delta', 'synchy') : __('Baseline', 'synchy')); ?></span>
 						</div>
 						<p class="synchy-field-note" data-synchy-sync-preview-message><?php esc_html_e('Run Preview Changes to see how many files and database rows Synchy will sync before anything is sent.', 'synchy'); ?></p>
+						<div class="synchy-run-export">
+							<div class="synchy-input-row">
+								<button type="submit" class="button" data-synchy-save-sync><?php esc_html_e('Save Connection', 'synchy'); ?></button>
+								<button type="button" class="button" data-synchy-test-sync><?php esc_html_e('Test Connection', 'synchy'); ?></button>
+								<button type="button" class="button" data-synchy-preview-sync><?php esc_html_e('Preview Changes', 'synchy'); ?></button>
+								<button type="button" class="button button-primary button-large" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
+								<button
+									type="button"
+									class="button"
+									data-synchy-mark-baseline
+									<?php echo $scope_status['hasPendingBaseline'] ? '' : 'style="display:none"'; ?>
+								>
+									<?php esc_html_e('Mark Manual Baseline Complete', 'synchy'); ?>
+								</button>
+							</div>
+							<p class="synchy-field-note" data-synchy-sync-target-note>
+								<?php
+								printf(
+									/* translators: %s: destination URL */
+									esc_html__('Sync sends changes only to %s.', 'synchy'),
+									esc_html((string) ($options['destination_url'] ?: __('the destination URL above', 'synchy')))
+								);
+								?>
+							</p>
+						</div>
 						<div class="synchy-export-meta" data-synchy-sync-preview-meta></div>
 						<div class="synchy-sync-tree is-hidden" data-synchy-sync-preview-tree></div>
 					</div>
@@ -8396,11 +8395,15 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'pluginVersion' => __('Plugin version', 'synchy'),
 					'authenticatedAs' => __('Authenticated as', 'synchy'),
 					'selectedScopes' => __('Selected scopes', 'synchy'),
+					'needsBaseline' => __('Needs baseline', 'synchy'),
 					'pendingBaseline' => __('Still need baseline', 'synchy'),
+					'pendingChanges' => __('Pending changes', 'synchy'),
+					'readyForPreview' => __('Ready for preview', 'synchy'),
+					'noChangesInScope' => __('No changes', 'synchy'),
 					'changedFiles' => __('Changed files', 'synchy'),
 					'dbTables' => __('Database tables', 'synchy'),
-					'previewSelectionTitle' => __('Choose What This Sync Sends', 'synchy'),
-					'previewSelectionHelp' => __('Files are selectable by section. Database changes are selectable by table.', 'synchy'),
+					'previewSelectionTitle' => __('Pending Changes', 'synchy'),
+					'previewSelectionHelp' => __('Review the pending file sections and database tables, then uncheck anything you do not want to send.', 'synchy'),
 					'sampleRowIds' => __('Sample row IDs', 'synchy'),
 					'syncRunning' => __('Sync running', 'synchy'),
 					'selectedChanges' => __('Selected changes', 'synchy'),
