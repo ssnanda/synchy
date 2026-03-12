@@ -10,6 +10,7 @@
 	const testButton = document.querySelector("[data-synchy-test-sync]");
 	const previewButton = document.querySelector("[data-synchy-preview-sync]");
 	const runButton = document.querySelector("[data-synchy-run-sync]");
+	const manualBaselineButton = document.querySelector("[data-synchy-mark-baseline]");
 	const connectionPanel = document.querySelector("[data-synchy-sync-connection-result]");
 	const connectionBadge = document.querySelector("[data-synchy-sync-connection-badge]");
 	const connectionMessage = document.querySelector("[data-synchy-sync-connection-message]");
@@ -20,12 +21,16 @@
 	const statusBadge = document.querySelector("[data-synchy-sync-status-badge]");
 	const statusMessage = document.querySelector("[data-synchy-sync-status-message]");
 	const statusMeta = document.querySelector("[data-synchy-sync-status-meta]");
+	const destinationUrlInput = document.querySelector("[data-synchy-sync-url]");
+	const targetNote = document.querySelector("[data-synchy-sync-target-note]");
+	const scopeInputs = Array.from(document.querySelectorAll("[data-synchy-sync-scope]"));
 
 	if (
 		!form ||
 		!testButton ||
 		!previewButton ||
 		!runButton ||
+		!manualBaselineButton ||
 		!previewBadge ||
 		!previewMessage ||
 		!previewMeta ||
@@ -38,6 +43,7 @@
 
 	let latestPreview = null;
 	let busy = false;
+	let pendingBaselineScopeIds = new Set((config.scopeStatus?.pendingBaselineScopeIds || []).map(String));
 
 	const escapeHtml = (value) =>
 		String(value)
@@ -88,19 +94,6 @@
 		return `${secs}s`;
 	};
 
-	const setBusy = (isBusy, buttonText = "") => {
-		busy = isBusy;
-
-		if (saveButton) {
-			saveButton.disabled = isBusy;
-		}
-
-		testButton.disabled = isBusy;
-		previewButton.disabled = isBusy;
-		runButton.disabled = isBusy || latestPreview === null;
-		runButton.textContent = isBusy ? buttonText || (config.strings.syncingAction || "Syncing...") : (config.strings.syncAction || "Sync Changes");
-	};
-
 	const renderMeta = (container, items) => {
 		if (!container) {
 			return;
@@ -119,6 +112,89 @@
 					`<div><span class="synchy-export-meta__label">${escapeHtml(item.label)}</span><strong>${item.html ? item.value : escapeHtml(item.value)}</strong></div>`
 			)
 			.join("");
+	};
+
+	const getSelectedScopeIds = () =>
+		scopeInputs
+			.filter((input) => input.checked)
+			.map((input) => String(input.dataset.scopeId || ""));
+
+	const getSelectedScopeLabels = () =>
+		scopeInputs
+			.filter((input) => input.checked)
+			.map((input) => input.closest(".synchy-scope-card")?.querySelector("strong")?.textContent?.trim() || "")
+			.filter(Boolean);
+
+	const getHasSelection = () => getSelectedScopeIds().length > 0;
+
+	const getHasPendingBaselineSelection = () =>
+		getSelectedScopeIds().some((scopeId) => pendingBaselineScopeIds.has(String(scopeId)));
+
+	const getRunActionLabel = () =>
+		getHasPendingBaselineSelection()
+			? (config.strings.startBaseline || "Start Baseline")
+			: (config.strings.pushChanges || "Push Changes");
+
+	const updateTargetNote = () => {
+		if (!targetNote) {
+			return;
+		}
+
+		const destination = destinationUrlInput?.value?.trim() || "the destination URL above";
+		targetNote.textContent = `Sync sends changes only to ${destination}.`;
+	};
+
+	const updateScopeCards = () => {
+		scopeInputs.forEach((input) => {
+			const card = input.closest(".synchy-scope-card");
+			const status = card?.querySelector(".synchy-scope-card__status");
+			const scopeId = String(input.dataset.scopeId || "");
+			const pending = pendingBaselineScopeIds.has(scopeId);
+
+			if (!card || !status) {
+				return;
+			}
+
+			card.classList.toggle("is-pending", pending);
+			card.classList.toggle("is-complete", !pending);
+			status.textContent = pending ? "Needs baseline" : "Baseline done";
+		});
+	};
+
+	const updateActionButtons = () => {
+		const hasSelection = getHasSelection();
+		const runLabel = getRunActionLabel();
+
+		previewButton.disabled = busy || !hasSelection;
+		runButton.disabled = busy || latestPreview === null || !hasSelection;
+		runButton.textContent = busy ? (config.strings.syncingAction || "Syncing...") : runLabel;
+
+		if (manualBaselineButton) {
+			const showManualBaseline = hasSelection && getHasPendingBaselineSelection();
+			manualBaselineButton.style.display = showManualBaseline ? "" : "none";
+			manualBaselineButton.disabled = busy || !showManualBaseline;
+		}
+	};
+
+	const setBusy = (isBusy) => {
+		busy = isBusy;
+
+		if (saveButton) {
+			saveButton.disabled = isBusy;
+		}
+
+		testButton.disabled = isBusy;
+		updateActionButtons();
+	};
+
+	const applyScopeStatus = (scopeStatus) => {
+		if (!scopeStatus || !Array.isArray(scopeStatus.pendingBaselineScopeIds)) {
+			return;
+		}
+
+		pendingBaselineScopeIds = new Set(scopeStatus.pendingBaselineScopeIds.map(String));
+		updateScopeCards();
+		updateActionButtons();
 	};
 
 	const renderConnectionResult = (payload, isError = false) => {
@@ -160,6 +236,8 @@
 		const dbRows = Number(preview.dbRows || 0);
 		const tableCounts = preview.tableCounts || {};
 		const sampleFiles = Array.isArray(preview.filePaths) ? preview.filePaths.slice(0, 8) : [];
+		const selectedScopes = Array.isArray(preview.selectedScopeLabels) ? preview.selectedScopeLabels : [];
+		const pendingScopes = Array.isArray(preview.pendingBaselineLabels) ? preview.pendingBaselineLabels : [];
 		const tableSummary = Object.entries(tableCounts)
 			.filter((entry) => Number(entry[1] || 0) > 0)
 			.map((entry) => `${escapeHtml(entry[0])} (${escapeHtml(entry[1])})`)
@@ -177,6 +255,8 @@
 		renderMeta(previewMeta, [
 			{ label: config.strings.lastSync || "Last successful Sync", value: formatDateTime(preview.lastSyncTime || "") },
 			{ label: "Mode", value: mode },
+			{ label: config.strings.selectedScopes || "Selected scopes", value: selectedScopes.join(", ") || "None" },
+			{ label: config.strings.pendingBaseline || "Still need baseline", value: pendingScopes.join(", ") || "None" },
 			{ label: config.strings.files || "Files", value: filesCount.toLocaleString() },
 			{ label: config.strings.dbRows || "DB rows", value: dbRows.toLocaleString() },
 			{ label: config.strings.tableUpdates || "Table updates", value: tableSummary || "None", html: true },
@@ -213,6 +293,7 @@
 			{ label: config.strings.lastRun || "Last run", value: formatDateTime(status?.at || "") },
 			{ label: config.strings.lastSync || "Last successful Sync", value: formatDateTime(status?.lastSyncTime || "") },
 			{ label: config.strings.destination || "Destination", value: status?.destinationUrl || "" },
+			{ label: config.strings.selectedScopes || "Selected scopes", value: Array.isArray(status?.selectedScopeLabels) ? status.selectedScopeLabels.join(", ") : "" },
 			{ label: config.strings.files || "Files", value: Number(status?.filesSynced || 0).toLocaleString() },
 			{ label: config.strings.dbRows || "DB rows", value: Number(status?.dbRowsSynced || 0).toLocaleString() },
 			{
@@ -229,8 +310,8 @@
 
 	const clearPreview = () => {
 		latestPreview = null;
-		runButton.disabled = true;
 		renderPreview(null);
+		updateActionButtons();
 	};
 
 	const collectFormData = (action) => {
@@ -264,8 +345,19 @@
 		return payload.data || {};
 	};
 
+	const requireSelection = () => {
+		if (getHasSelection()) {
+			return true;
+		}
+
+		previewBadge.textContent = config.strings.previewError || "Preview failed";
+		previewMessage.textContent = config.strings.selectAtLeastOneScope || "Select at least one file or database scope first.";
+		renderMeta(previewMeta, []);
+		return false;
+	};
+
 	const runTestConnection = async () => {
-		setBusy(true, config.strings.syncAction || "Sync Changes");
+		setBusy(true);
 
 		try {
 			const data = await sendAjax("synchy_test_sync_connection");
@@ -278,16 +370,20 @@
 	};
 
 	const runPreview = async () => {
-		setBusy(true, config.strings.syncAction || "Sync Changes");
+		if (!requireSelection()) {
+			updateActionButtons();
+			return;
+		}
+
+		setBusy(true);
 
 		try {
 			const data = await sendAjax("synchy_preview_sync_changes");
 			latestPreview = data.preview || null;
+			applyScopeStatus(data.scopeStatus || null);
 			renderPreview(latestPreview);
-			runButton.disabled = latestPreview === null;
 		} catch (error) {
 			latestPreview = null;
-			runButton.disabled = true;
 			previewBadge.textContent = config.strings.previewError || "Preview failed";
 			previewMessage.textContent = error.message;
 			renderMeta(previewMeta, []);
@@ -296,23 +392,33 @@
 		}
 	};
 
-	const runSync = async () => {
-		if (latestPreview === null) {
+	const runManualBaseline = async () => {
+		if (!requireSelection()) {
+			updateActionButtons();
 			return;
 		}
 
-		if (!window.confirm(config.strings.confirmSync || "Sync the previewed changes to the destination site now?")) {
+		const destinationUrl = destinationUrlInput?.value?.trim() || "";
+		const scopeLabels = getSelectedScopeLabels();
+		const confirmMessage = [
+			config.strings.confirmBaseline || "Mark the selected scopes as already baselined after a successful manual full restore to the destination site?",
+			"",
+			`Destination: ${destinationUrl || "Not set"}`,
+			`Scopes: ${scopeLabels.join(", ") || "None"}`,
+		].join("\n");
+
+		if (!window.confirm(confirmMessage)) {
 			return;
 		}
 
-		setBusy(true, config.strings.syncingAction || "Syncing...");
+		setBusy(true);
 		statusBadge.textContent = config.strings.syncingAction || "Syncing...";
-		statusMessage.textContent = "Sync is running. Keep this tab open until it finishes.";
+		statusMessage.textContent = "Saving the selected manual baseline state.";
 
 		try {
-			const data = await sendAjax("synchy_run_sync_changes");
-			const status = data.status || {};
-			renderStatus(status);
+			const data = await sendAjax("synchy_mark_sync_baseline_complete");
+			renderStatus(data.status || {});
+			applyScopeStatus(data.scopeStatus || null);
 			clearPreview();
 		} catch (error) {
 			renderStatus({
@@ -323,7 +429,7 @@
 				filesSynced: 0,
 				dbRowsSynced: 0,
 				durationSeconds: 0,
-				destinationUrl: "",
+				destinationUrl: destinationUrl || "",
 				mode: "",
 			});
 		} finally {
@@ -331,9 +437,67 @@
 		}
 	};
 
-	form.addEventListener("input", clearPreview);
-	form.addEventListener("change", clearPreview);
+	const runSync = async () => {
+		if (latestPreview === null) {
+			return;
+		}
+
+		const destinationUrl = destinationUrlInput?.value?.trim() || "";
+		const scopeLabels = getSelectedScopeLabels();
+		const confirmMessage = [
+			config.strings.confirmSync || "Sync the previewed changes to the destination site now?",
+			"",
+			`Destination: ${destinationUrl || "Not set"}`,
+			`Scopes: ${scopeLabels.join(", ") || "None"}`,
+		].join("\n");
+
+		if (!window.confirm(confirmMessage)) {
+			return;
+		}
+
+		setBusy(true);
+		statusBadge.textContent = config.strings.syncingAction || "Syncing...";
+		statusMessage.textContent = "Sync is running. Keep this tab open until it finishes.";
+
+		try {
+			const data = await sendAjax("synchy_run_sync_changes");
+			renderStatus(data.status || {});
+			applyScopeStatus(data.scopeStatus || null);
+			clearPreview();
+		} catch (error) {
+			renderStatus({
+				status: "error",
+				message: error.message,
+				at: new Date().toISOString(),
+				lastSyncTime: "",
+				filesSynced: 0,
+				dbRowsSynced: 0,
+				durationSeconds: 0,
+				destinationUrl: destinationUrl || "",
+				mode: "",
+			});
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	form.addEventListener("input", () => {
+		clearPreview();
+		updateTargetNote();
+		updateActionButtons();
+	});
+	form.addEventListener("change", () => {
+		clearPreview();
+		updateTargetNote();
+		updateScopeCards();
+		updateActionButtons();
+	});
 	testButton.addEventListener("click", runTestConnection);
 	previewButton.addEventListener("click", runPreview);
 	runButton.addEventListener("click", runSync);
+	manualBaselineButton.addEventListener("click", runManualBaseline);
+
+	updateTargetNote();
+	updateScopeCards();
+	updateActionButtons();
 })();

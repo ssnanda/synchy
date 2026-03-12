@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.25
+ * Version: 0.7.26
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.25';
+const SYNCHY_VERSION = '0.7.26';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -827,14 +827,18 @@ function synchy_sanitize_site_sync_options($value): array
 	$sanitized['verify_ssl'] = empty($value['verify_ssl']) ? 0 : 1;
 
 	$scope_definitions = synchy_get_sync_scope_definitions();
-	$scope_input_present = false;
+	$scope_input_present = !empty($value['sync_scope_selection_present']);
+	$existing_has_selected_scope = false;
 
 	foreach ($scope_definitions as $scope) {
 		$option_key = (string) $scope['option_key'];
 
 		if (array_key_exists($option_key, $value)) {
 			$scope_input_present = true;
-			break;
+		}
+
+		if (!empty($existing[$option_key])) {
+			$existing_has_selected_scope = true;
 		}
 	}
 
@@ -846,7 +850,7 @@ function synchy_sanitize_site_sync_options($value): array
 			continue;
 		}
 
-		if (array_key_exists($option_key, $existing)) {
+		if ($existing_has_selected_scope && array_key_exists($option_key, $existing)) {
 			$sanitized[$option_key] = empty($existing[$option_key]) ? 0 : 1;
 			continue;
 		}
@@ -866,8 +870,29 @@ function synchy_get_site_sync_options(): array
 	}
 
 	$options = wp_parse_args($saved, synchy_get_site_sync_defaults());
+	$options['destination_url'] = synchy_sanitize_site_sync_url((string) ($options['destination_url'] ?? ''));
+	$options['destination_username'] = trim(sanitize_text_field((string) ($options['destination_username'] ?? '')));
+	$options['destination_application_password'] = synchy_normalize_application_password((string) ($options['destination_application_password'] ?? ''));
+	$options['verify_ssl'] = empty($options['verify_ssl']) ? 0 : 1;
 
-	return synchy_sanitize_site_sync_options($options);
+	$scope_selected = false;
+
+	foreach (synchy_get_sync_scope_definitions() as $scope) {
+		$option_key = (string) $scope['option_key'];
+		$options[$option_key] = empty($options[$option_key]) ? 0 : 1;
+
+		if (!empty($options[$option_key])) {
+			$scope_selected = true;
+		}
+	}
+
+	if (!$scope_selected) {
+		foreach (synchy_get_sync_scope_definitions() as $scope) {
+			$options[(string) $scope['option_key']] = 1;
+		}
+	}
+
+	return $options;
 }
 
 function synchy_get_site_sync_password_hint(array $options): string
@@ -905,6 +930,93 @@ function synchy_get_sync_status(): array
 function synchy_set_sync_status(array $status): void
 {
 	update_option(SYNCHY_SYNC_STATUS_OPTION, $status, false);
+}
+
+function synchy_build_sync_manual_baseline_fingerprints(array $selected_scope_ids): array
+{
+	global $wpdb;
+
+	$specs = synchy_get_sync_table_specs();
+	$fingerprints = [];
+
+	if (in_array('db_options', $selected_scope_ids, true)) {
+		$fingerprints[$wpdb->options] = synchy_build_sync_table_fingerprints(
+			synchy_get_sync_option_rows(),
+			(array) ($specs[$wpdb->options]['key_columns'] ?? [])
+		);
+	}
+
+	if (in_array('db_taxonomies', $selected_scope_ids, true)) {
+		foreach ([$wpdb->terms, $wpdb->term_taxonomy, $wpdb->term_relationships] as $table) {
+			$fingerprints[$table] = synchy_build_sync_table_fingerprints(
+				synchy_fetch_all_rows_from_table($table),
+				(array) ($specs[$table]['key_columns'] ?? [])
+			);
+		}
+	}
+
+	return $fingerprints;
+}
+
+function synchy_mark_sync_baseline_complete(array $raw_options)
+{
+	$options = synchy_sanitize_site_sync_options($raw_options);
+	$validation = synchy_validate_site_sync_options($options);
+
+	if (is_wp_error($validation)) {
+		return $validation;
+	}
+
+	$selected_scope_ids = synchy_get_selected_sync_scope_ids($options);
+
+	if ($selected_scope_ids === []) {
+		return new WP_Error('synchy_sync_no_scope_selected', __('Select at least one file or database scope before marking the baseline.', 'synchy'));
+	}
+
+	$sync_time = time();
+	$state = synchy_get_sync_state();
+	$scope_sync_times = isset($state['scope_sync_times']) && is_array($state['scope_sync_times']) ? $state['scope_sync_times'] : [];
+
+	foreach ($selected_scope_ids as $scope_id) {
+		$scope_sync_times[$scope_id] = $sync_time;
+	}
+
+	$state['last_sync_time'] = $sync_time;
+	$state['scope_sync_times'] = $scope_sync_times;
+	$state['db_fingerprints'] = array_replace(
+		isset($state['db_fingerprints']) && is_array($state['db_fingerprints']) ? $state['db_fingerprints'] : [],
+		synchy_build_sync_manual_baseline_fingerprints($selected_scope_ids)
+	);
+
+	$write = synchy_write_sync_state($state);
+
+	if (is_wp_error($write)) {
+		return $write;
+	}
+
+	synchy_set_sync_last_time($sync_time);
+	synchy_set_sync_status([
+		'status' => 'success',
+		'mode' => 'baseline',
+		'at' => gmdate('c', $sync_time),
+		'lastSyncTime' => $sync_time,
+		'destinationUrl' => (string) ($options['destination_url'] ?? ''),
+		'filesSynced' => 0,
+		'dbRowsSynced' => 0,
+		'durationSeconds' => 0,
+		'selectedScopes' => $selected_scope_ids,
+		'selectedScopeLabels' => synchy_get_sync_scope_labels($selected_scope_ids),
+		'message' => sprintf(
+			/* translators: %s: comma-separated scope labels */
+			__('Manual baseline marked for %s. The next Sync preview will calculate deltas from this baseline.', 'synchy'),
+			implode(', ', synchy_get_sync_scope_labels($selected_scope_ids))
+		),
+	]);
+
+	return [
+		'status' => synchy_get_sync_status(),
+		'selectedScopes' => $selected_scope_ids,
+	];
 }
 
 function synchy_get_import_result(): array
@@ -4284,6 +4396,7 @@ function synchy_run_sync_changes(array $raw_options)
 			'dbRowsSynced' => 0,
 			'durationSeconds' => 0,
 			'destinationUrl' => (string) ($options['destination_url'] ?? ''),
+			'selectedScopeLabels' => (array) ($summary['selectedScopeLabels'] ?? []),
 			'at' => gmdate('c'),
 			'message' => __('No changes detected since the last successful Sync.', 'synchy'),
 			'lastSyncTime' => synchy_get_sync_last_time(),
@@ -4309,6 +4422,7 @@ function synchy_run_sync_changes(array $raw_options)
 			'dbRowsSynced' => (int) ($summary['dbRows'] ?? 0),
 			'durationSeconds' => round(microtime(true) - $started, 2),
 			'destinationUrl' => (string) ($options['destination_url'] ?? ''),
+			'selectedScopeLabels' => (array) ($summary['selectedScopeLabels'] ?? []),
 			'at' => gmdate('c'),
 			'message' => $remote->get_error_message(),
 			'lastSyncTime' => synchy_get_sync_last_time(),
@@ -4339,6 +4453,7 @@ function synchy_run_sync_changes(array $raw_options)
 		'dbRowsSynced' => (int) ($summary['dbRows'] ?? 0),
 		'durationSeconds' => $duration,
 		'destinationUrl' => (string) ($options['destination_url'] ?? ''),
+		'selectedScopeLabels' => (array) ($summary['selectedScopeLabels'] ?? []),
 		'at' => gmdate('c'),
 		'lastSyncTime' => $sync_time,
 		'message' => sprintf(
@@ -6563,11 +6678,14 @@ function synchy_render_incremental_site_sync_page(array $current): void
 {
 	$options = synchy_get_site_sync_options();
 	$password_hint = synchy_get_site_sync_password_hint($options);
+	$scope_groups = synchy_get_sync_scope_groups();
+	$scope_status = synchy_get_sync_scope_status($options);
 	$last_sync_time = synchy_get_sync_last_time();
 	$status = synchy_get_sync_status();
 	$status_state = (string) ($status['status'] ?? '');
 	$status_badge = __('Awaiting baseline', 'synchy');
 	$status_message = __('No Sync has completed yet. The first Sync sends a baseline for the selected folders and database tables. Later Sync runs send deltas only.', 'synchy');
+	$run_button_label = $scope_status['hasPendingBaseline'] ? __('Start Baseline', 'synchy') : __('Push Changes', 'synchy');
 
 	if ($status_state === 'success') {
 		$status_badge = __('Success', 'synchy');
@@ -6578,7 +6696,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	} elseif ($status_state === 'idle') {
 		$status_badge = __('No changes', 'synchy');
 		$status_message = (string) ($status['message'] ?? __('No file or database changes were detected for Sync.', 'synchy'));
-	} elseif ($last_sync_time > 0) {
+	} elseif (!$scope_status['hasPendingBaseline']) {
 		$status_badge = __('Delta ready', 'synchy');
 	}
 	?>
@@ -6593,12 +6711,13 @@ function synchy_render_incremental_site_sync_page(array $current): void
 				</div>
 				<div class="synchy-status">
 					<span class="synchy-status__dot" aria-hidden="true"></span>
-					<?php echo esc_html($last_sync_time > 0 ? __('Delta ready', 'synchy') : __('Baseline ready', 'synchy')); ?>
+					<?php echo esc_html($scope_status['hasPendingBaseline'] ? __('Baseline ready', 'synchy') : __('Delta ready', 'synchy')); ?>
 				</div>
 			</div>
 
 			<form method="post" action="options.php" class="synchy-form" data-synchy-sync-form>
 				<?php settings_fields('synchy_site_sync'); ?>
+				<input type="hidden" name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[sync_scope_selection_present]" value="1" />
 
 				<div class="synchy-grid synchy-grid--upload-live">
 					<div class="synchy-panel synchy-panel--muted">
@@ -6659,13 +6778,73 @@ function synchy_render_incremental_site_sync_page(array $current): void
 							</p>
 						</div>
 
+						<div class="synchy-field">
+							<div class="synchy-stack synchy-stack--compact">
+								<div>
+									<label class="synchy-label"><?php esc_html_e('Baseline and Push Scope', 'synchy'); ?></label>
+									<p class="synchy-field-note">
+										<?php esc_html_e('Choose exactly what this Sync should control on the selected destination. Unchecked scopes are ignored.', 'synchy'); ?>
+									</p>
+								</div>
+								<?php foreach ($scope_groups as $group) : ?>
+									<div class="synchy-scope-group">
+										<p class="synchy-stage-status__label"><?php echo esc_html((string) $group['label']); ?></p>
+										<div class="synchy-filter-list synchy-filter-list--stacked">
+											<?php foreach ($group['scopes'] as $scope_id => $scope) : ?>
+												<label class="synchy-scope-card">
+													<input
+														type="checkbox"
+														name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[<?php echo esc_attr((string) $scope['option_key']); ?>]"
+														value="1"
+														<?php checked(!empty($options[(string) $scope['option_key']])); ?>
+														data-synchy-sync-scope
+														data-scope-id="<?php echo esc_attr((string) $scope_id); ?>"
+													/>
+													<span class="synchy-scope-card__body">
+														<strong><?php echo esc_html((string) $scope['label']); ?></strong>
+														<span><?php echo esc_html((string) $scope['description']); ?></span>
+														<em class="synchy-scope-card__status">
+															<?php
+															echo esc_html(
+																in_array((string) $scope_id, $scope_status['pendingBaselineScopeIds'], true)
+																	? __('Needs baseline', 'synchy')
+																	: __('Baseline done', 'synchy')
+															);
+															?>
+														</em>
+													</span>
+												</label>
+											<?php endforeach; ?>
+										</div>
+									</div>
+								<?php endforeach; ?>
+							</div>
+						</div>
+
 						<div class="synchy-run-export">
 							<div class="synchy-input-row">
 								<button type="submit" class="button" data-synchy-save-sync><?php esc_html_e('Save Connection', 'synchy'); ?></button>
 								<button type="button" class="button" data-synchy-test-sync><?php esc_html_e('Test Connection', 'synchy'); ?></button>
 								<button type="button" class="button" data-synchy-preview-sync><?php esc_html_e('Preview Changes', 'synchy'); ?></button>
-								<button type="button" class="button button-primary button-large" data-synchy-run-sync disabled><?php esc_html_e('Sync Changes', 'synchy'); ?></button>
+								<button type="button" class="button button-primary button-large" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
+								<button
+									type="button"
+									class="button"
+									data-synchy-mark-baseline
+									<?php echo $scope_status['hasPendingBaseline'] ? '' : 'style="display:none"'; ?>
+								>
+									<?php esc_html_e('Mark Manual Baseline Complete', 'synchy'); ?>
+								</button>
 							</div>
+							<p class="synchy-field-note" data-synchy-sync-target-note>
+								<?php
+								printf(
+									/* translators: %s: destination URL */
+									esc_html__('Sync sends changes only to %s.', 'synchy'),
+									esc_html((string) ($options['destination_url'] ?: __('the destination URL above', 'synchy')))
+								);
+								?>
+							</p>
 						</div>
 					</div>
 					<div class="synchy-stack">
@@ -6733,8 +6912,28 @@ function synchy_render_incremental_site_sync_page(array $current): void
 					<div class="synchy-panel">
 						<h2><?php esc_html_e('Current Scope', 'synchy'); ?></h2>
 						<ul class="synchy-checklist">
-							<li><?php esc_html_e('Files: wp-content/plugins, the active theme only, and wp-content/uploads.', 'synchy'); ?></li>
-							<li><?php esc_html_e('Database: posts, postmeta, options, terms, term taxonomies, and term relationships.', 'synchy'); ?></li>
+							<li>
+								<?php
+								printf(
+									/* translators: %s: comma-separated scope labels */
+									esc_html__('Selected now: %s.', 'synchy'),
+									esc_html(implode(', ', $scope_status['selectedScopeLabels']))
+								);
+								?>
+							</li>
+							<li>
+								<?php
+								echo esc_html(
+									$scope_status['hasPendingBaseline']
+										? sprintf(
+											/* translators: %s: comma-separated scope labels */
+											__('Still need baseline: %s.', 'synchy'),
+											implode(', ', $scope_status['pendingBaselineLabels'])
+										)
+										: __('All selected scopes already have a baseline.', 'synchy')
+								);
+								?>
+							</li>
 							<li><?php esc_html_e('Users and passwords are never synced.', 'synchy'); ?></li>
 							<li><?php esc_html_e('File deletes are not applied on the live site yet. Sync only overwrites changed files and adds new ones.', 'synchy'); ?></li>
 						</ul>
@@ -7198,7 +7397,10 @@ add_action('wp_ajax_synchy_preview_sync_changes', function (): void {
 		wp_send_json_error(['message' => $result->get_error_message()], 400);
 	}
 
-	wp_send_json_success(['preview' => $result]);
+	wp_send_json_success([
+		'preview' => $result,
+		'scopeStatus' => synchy_get_sync_scope_status($options),
+	]);
 });
 
 add_action('wp_ajax_synchy_test_sync_connection', function (): void {
@@ -7218,6 +7420,26 @@ add_action('wp_ajax_synchy_test_sync_connection', function (): void {
 	wp_send_json_success(['remoteSite' => $result]);
 });
 
+add_action('wp_ajax_synchy_mark_sync_baseline_complete', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to mark a Synchy Sync baseline.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
+	$result = synchy_mark_sync_baseline_complete($options);
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(['message' => $result->get_error_message()], 400);
+	}
+
+	wp_send_json_success([
+		'status' => (array) ($result['status'] ?? []),
+		'scopeStatus' => synchy_get_sync_scope_status($options),
+	]);
+});
+
 add_action('wp_ajax_synchy_run_sync_changes', function (): void {
 	if (!current_user_can('manage_options')) {
 		wp_send_json_error(['message' => __('You are not allowed to run Synchy Sync changes.', 'synchy')], 403);
@@ -7232,7 +7454,10 @@ add_action('wp_ajax_synchy_run_sync_changes', function (): void {
 		wp_send_json_error(['message' => $result->get_error_message()], 400);
 	}
 
-	wp_send_json_success(['status' => $result]);
+	wp_send_json_success([
+		'status' => $result,
+		'scopeStatus' => synchy_get_sync_scope_status($options),
+	]);
 });
 
 add_action('admin_post_synchy_download_export', function (): void {
@@ -7679,12 +7904,15 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 			[
 				'ajaxUrl' => admin_url('admin-ajax.php'),
 				'nonce' => wp_create_nonce('synchy_sync_ajax'),
+				'scopeStatus' => synchy_get_sync_scope_status(synchy_get_site_sync_options()),
 				'strings' => [
 					'connectionReady' => __('Connection ready', 'synchy'),
 					'connectionError' => __('Connection failed', 'synchy'),
 					'previewReady' => __('Preview ready', 'synchy'),
 					'previewError' => __('Preview failed', 'synchy'),
-					'syncAction' => __('Sync Changes', 'synchy'),
+					'startBaseline' => __('Start Baseline', 'synchy'),
+					'pushChanges' => __('Push Changes', 'synchy'),
+					'markManualBaseline' => __('Mark Manual Baseline Complete', 'synchy'),
 					'syncingAction' => __('Syncing...', 'synchy'),
 					'success' => __('Success', 'synchy'),
 					'error' => __('Error', 'synchy'),
@@ -7701,6 +7929,8 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'site' => __('Site', 'synchy'),
 					'pluginVersion' => __('Plugin version', 'synchy'),
 					'authenticatedAs' => __('Authenticated as', 'synchy'),
+					'selectedScopes' => __('Selected scopes', 'synchy'),
+					'pendingBaseline' => __('Still need baseline', 'synchy'),
 					'tableUpdates' => __('Table updates', 'synchy'),
 					'sampleFiles' => __('Sample files', 'synchy'),
 					'never' => __('Never', 'synchy'),
@@ -7708,6 +7938,8 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'previewDefault' => __('Run Preview Changes to review changed files and database rows before syncing.', 'synchy'),
 					'unknownError' => __('Synchy hit an unexpected Sync error.', 'synchy'),
 					'confirmSync' => __('Sync the previewed changes to the destination site now?', 'synchy'),
+					'confirmBaseline' => __('Mark the selected scopes as already baselined after a successful manual full restore to the destination site?', 'synchy'),
+					'selectAtLeastOneScope' => __('Select at least one file or database scope first.', 'synchy'),
 				],
 			]
 		);

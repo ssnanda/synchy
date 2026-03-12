@@ -221,6 +221,10 @@
 	gap: 16px;
 }
 
+.synchy-filter-list--stacked {
+	grid-template-columns: 1fr;
+}
+
 .synchy-filter-card {
 	padding: 18px;
 	border: 1px solid #d7e1da;
@@ -239,6 +243,60 @@
 	color: #12323b;
 	font-size: 15px;
 	font-weight: 700;
+}
+
+.synchy-scope-group {
+	display: grid;
+	gap: 10px;
+}
+
+.synchy-scope-card {
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	padding: 16px;
+	border: 1px solid #d7e1da;
+	border-radius: 18px;
+	background: #ffffff;
+	cursor: pointer;
+}
+
+.synchy-scope-card input {
+	margin-top: 3px;
+}
+
+.synchy-scope-card__body {
+	display: grid;
+	gap: 4px;
+}
+
+.synchy-scope-card__body strong {
+	color: #12323b;
+	font-size: 15px;
+}
+
+.synchy-scope-card__body span {
+	color: #517075;
+	font-size: 14px;
+	line-height: 1.5;
+}
+
+.synchy-scope-card__status {
+	color: #1f8f5f;
+	font-size: 12px;
+	font-style: normal;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.synchy-scope-card.is-pending {
+	border-color: #dfc19a;
+	background: #fff8ef;
+}
+
+.synchy-scope-card.is-pending .synchy-scope-card__status {
+	color: #9b5c00;
 }
 
 .synchy-patterns {
