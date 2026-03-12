@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.30
+ * Version: 0.7.31
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.30';
+const SYNCHY_VERSION = '0.7.31';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -7258,43 +7258,6 @@ function synchy_render_incremental_site_sync_page(array $current): void
 							</div>
 						</div>
 
-						<div class="synchy-progress<?php echo $running_job === [] ? ' is-hidden' : ''; ?>" data-synchy-sync-progress>
-							<div class="synchy-progress__top">
-								<strong data-synchy-sync-progress-phase><?php echo esc_html(synchy_sync_phase_label((string) ($running_job['phase'] ?? ''))); ?></strong>
-								<span data-synchy-sync-progress-percent><?php echo esc_html((string) (int) ($running_job['progress'] ?? 0)); ?>%</span>
-							</div>
-							<div class="synchy-progress__bar">
-								<span data-synchy-sync-progress-bar style="width: <?php echo esc_attr((string) (int) ($running_job['progress'] ?? 0)); ?>%;"></span>
-							</div>
-							<p class="synchy-progress__message" data-synchy-sync-progress-message><?php echo esc_html((string) ($running_job['message'] ?? '')); ?></p>
-							<p class="synchy-progress__detail" data-synchy-sync-progress-detail>
-								<?php
-								if ($running_job !== []) {
-									printf(
-										/* translators: 1: file count, 2: db row count */
-										esc_html__('Selected changes: %1$s files, %2$s DB rows', 'synchy'),
-										esc_html(number_format_i18n((int) ($running_job['files_count'] ?? 0))),
-										esc_html(number_format_i18n((int) ($running_job['db_rows'] ?? 0)))
-									);
-								}
-								?>
-							</p>
-						</div>
-
-						<div class="synchy-stage-status">
-							<p class="synchy-stage-status__label"><?php esc_html_e('Sync Stage Status', 'synchy'); ?></p>
-							<div class="synchy-export-stages" data-synchy-sync-stages>
-								<?php foreach ($sync_stage_items as $stage) : ?>
-									<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
-										<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
-										<div class="synchy-export-stage__content">
-											<strong><?php echo esc_html((string) $stage['label']); ?></strong>
-											<span><?php echo esc_html((string) $stage['description']); ?></span>
-										</div>
-									</div>
-								<?php endforeach; ?>
-							</div>
-						</div>
 					</div>
 					<div class="synchy-stack">
 						<div class="synchy-panel synchy-site-sync-result is-hidden" data-synchy-sync-connection-result>
@@ -7343,18 +7306,66 @@ function synchy_render_incremental_site_sync_page(array $current): void
 								</div>
 							</div>
 						</div>
-					</div>
-				</div>
 
-				<div class="synchy-panel synchy-panel--wide synchy-site-sync-result" data-synchy-sync-preview-panel>
-					<div class="synchy-stack synchy-stack--compact">
-						<div class="synchy-stack__split">
-							<h2><?php esc_html_e('Preview', 'synchy'); ?></h2>
-							<span class="synchy-badge" data-synchy-sync-preview-badge><?php echo esc_html($last_sync_time > 0 ? __('Delta', 'synchy') : __('Baseline', 'synchy')); ?></span>
+						<div class="synchy-panel synchy-site-sync-result" data-synchy-sync-pending-panel>
+							<div class="synchy-stack synchy-stack--compact">
+								<div class="synchy-stack__split">
+									<h2><?php esc_html_e('Pending Changes', 'synchy'); ?></h2>
+									<span class="synchy-badge" data-synchy-sync-preview-badge><?php echo esc_html($last_sync_time > 0 ? __('Delta', 'synchy') : __('Baseline', 'synchy')); ?></span>
+								</div>
+								<p class="synchy-field-note" data-synchy-sync-preview-message><?php esc_html_e('Run Preview Changes to see how many files and database rows Synchy will sync before anything is sent.', 'synchy'); ?></p>
+								<div class="synchy-export-meta" data-synchy-sync-preview-meta></div>
+							</div>
 						</div>
-						<p class="synchy-field-note" data-synchy-sync-preview-message><?php esc_html_e('Run Preview Changes to see how many files and database rows Synchy will sync before anything is sent.', 'synchy'); ?></p>
-						<div class="synchy-export-meta" data-synchy-sync-preview-meta></div>
-						<div class="synchy-sync-tree is-hidden" data-synchy-sync-preview-tree></div>
+
+						<div class="synchy-panel synchy-site-sync-result" data-synchy-sync-preview-panel>
+							<div class="synchy-stack synchy-stack--compact">
+								<div class="synchy-stack__split">
+									<h2><?php esc_html_e('Preview', 'synchy'); ?></h2>
+									<span class="synchy-badge"><?php echo esc_html($running_job !== [] ? __('Sync running', 'synchy') : __('Ready', 'synchy')); ?></span>
+								</div>
+
+								<div class="synchy-progress<?php echo $running_job === [] ? ' is-hidden' : ''; ?>" data-synchy-sync-progress>
+									<div class="synchy-progress__top">
+										<strong data-synchy-sync-progress-phase><?php echo esc_html(synchy_sync_phase_label((string) ($running_job['phase'] ?? ''))); ?></strong>
+										<span data-synchy-sync-progress-percent><?php echo esc_html((string) (int) ($running_job['progress'] ?? 0)); ?>%</span>
+									</div>
+									<div class="synchy-progress__bar">
+										<span data-synchy-sync-progress-bar style="width: <?php echo esc_attr((string) (int) ($running_job['progress'] ?? 0)); ?>%;"></span>
+									</div>
+									<p class="synchy-progress__message" data-synchy-sync-progress-message><?php echo esc_html((string) ($running_job['message'] ?? '')); ?></p>
+									<p class="synchy-progress__detail" data-synchy-sync-progress-detail>
+										<?php
+										if ($running_job !== []) {
+											printf(
+												/* translators: 1: file count, 2: db row count */
+												esc_html__('Selected changes: %1$s files, %2$s DB rows', 'synchy'),
+												esc_html(number_format_i18n((int) ($running_job['files_count'] ?? 0))),
+												esc_html(number_format_i18n((int) ($running_job['db_rows'] ?? 0)))
+											);
+										}
+										?>
+									</p>
+								</div>
+
+								<div class="synchy-stage-status">
+									<p class="synchy-stage-status__label"><?php esc_html_e('Sync Stage Status', 'synchy'); ?></p>
+									<div class="synchy-export-stages" data-synchy-sync-stages>
+										<?php foreach ($sync_stage_items as $stage) : ?>
+											<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
+												<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
+												<div class="synchy-export-stage__content">
+													<strong><?php echo esc_html((string) $stage['label']); ?></strong>
+													<span><?php echo esc_html((string) $stage['description']); ?></span>
+												</div>
+											</div>
+										<?php endforeach; ?>
+									</div>
+								</div>
+
+								<div class="synchy-sync-tree is-hidden" data-synchy-sync-preview-tree></div>
+							</div>
+						</div>
 					</div>
 				</div>
 

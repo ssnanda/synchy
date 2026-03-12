@@ -275,6 +275,20 @@
 		});
 	};
 
+	const pruneScopeSelectionsFromPreview = () => {
+		scopeInputs.forEach((input) => {
+			const scopeId = String(input.dataset.scopeId || "");
+
+			if (!scopeId || pendingBaselineScopeIds.has(scopeId)) {
+				return;
+			}
+
+			if (!changedScopeIds.has(scopeId)) {
+				input.checked = false;
+			}
+		});
+	};
+
 	const updateActionButtons = () => {
 		const hasSelection = getHasSelection();
 		const runLabel = getRunActionLabel();
@@ -358,6 +372,7 @@
 		});
 
 		changedScopeIds = nextChangedScopeIds;
+		pruneScopeSelectionsFromPreview();
 		updateScopeCards();
 
 		if (fileGroups.length === 0 && databaseTables.length === 0) {
