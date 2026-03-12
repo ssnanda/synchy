@@ -653,17 +653,33 @@ function synchyInstallerBindParams(mysqli_stmt $statement, array $values): void
 	$references = [$types];
 
 	foreach ($values as $index => $value) {
-		$values[$index] = $value === null ? '' : (string) $value;
+		$values[$index] = $value === null ? null : (string) $value;
 		$references[] = &$values[$index];
 	}
 
 	call_user_func_array([$statement, 'bind_param'], $references);
 }
 
+function synchyInstallerBuildWhereClause(array $where, array &$values): string
+{
+	$parts = [];
+
+	foreach ($where as $column => $value) {
+		if ($value === null) {
+			$parts[] = synchyInstallerQuoteIdentifier($column) . ' IS NULL';
+			continue;
+		}
+
+		$parts[] = synchyInstallerQuoteIdentifier($column) . ' = ?';
+		$values[] = $value;
+	}
+
+	return implode(' AND ', $parts);
+}
+
 function synchyInstallerUpdateRow(mysqli $connection, string $tableName, array $updates, array $where): void
 {
 	$set_parts = [];
-	$where_parts = [];
 	$values = [];
 
 	foreach ($updates as $column => $value) {
@@ -671,14 +687,15 @@ function synchyInstallerUpdateRow(mysqli $connection, string $tableName, array $
 		$values[] = $value;
 	}
 
-	foreach ($where as $column => $value) {
-		$where_parts[] = synchyInstallerQuoteIdentifier($column) . ' = ?';
-		$values[] = $value;
+	$where_clause = synchyInstallerBuildWhereClause($where, $values);
+
+	if ($where_clause === '') {
+		throw new RuntimeException('Search-replace could not build a row-matching clause for table ' . $tableName . '.');
 	}
 
 	$sql = 'UPDATE ' . synchyInstallerQuoteIdentifier($tableName)
 		. ' SET ' . implode(', ', $set_parts)
-		. ' WHERE ' . implode(' AND ', $where_parts);
+		. ' WHERE ' . $where_clause;
 
 	$statement = $connection->prepare($sql);
 
@@ -760,12 +777,9 @@ function synchyInstallerSearchReplace(string $search, string $replace, mysqli $c
 			continue;
 		}
 
-		if ($primary_columns === []) {
-			$warnings[] = 'Skipped search-replace on ' . $tableName . ' because it does not have a primary key.';
-			continue;
-		}
+		$match_columns = $primary_columns !== [] ? $primary_columns : $text_columns;
 
-		$select_columns = array_values(array_unique(array_merge($primary_columns, $text_columns)));
+		$select_columns = array_values(array_unique(array_merge($match_columns, $text_columns)));
 		$select_sql = 'SELECT ' . implode(
 			', ',
 			array_map(
@@ -804,8 +818,8 @@ function synchyInstallerSearchReplace(string $search, string $replace, mysqli $c
 
 			$where = [];
 
-			foreach ($primary_columns as $column) {
-				$where[$column] = $row[$column];
+			foreach ($match_columns as $column) {
+				$where[$column] = $row[$column] ?? null;
 			}
 
 			synchyInstallerUpdateRow($connection, $tableName, $updates, $where);
@@ -988,7 +1002,6 @@ function synchyInstallerCopyFiles(string $extractDirectory, string $wordpressRoo
 		}
 
 		if ($relative_path === 'wp-config.php') {
-			$warnings[] = 'Skipped wp-config.php from the package so the destination credentials chosen in this installer remain active.';
 			continue;
 		}
 
@@ -1012,6 +1025,53 @@ function synchyInstallerCopyFiles(string $extractDirectory, string $wordpressRoo
 function synchyInstallerNormalizeUrl(string $url): string
 {
 	return rtrim($url, '/');
+}
+
+function synchyInstallerDestinationPathFromUrl(string $url): string
+{
+	$path = (string) parse_url($url, PHP_URL_PATH);
+	$path = trim(str_replace('\\', '/', $path));
+
+	if ($path === '' || $path === '/') {
+		return '/';
+	}
+
+	return '/' . trim($path, '/') . '/';
+}
+
+function synchyInstallerEnsureHtaccess(string $wordpressRoot, string $destinationUrl, array &$messages): void
+{
+	$htaccess_path = synchyInstallerPath($wordpressRoot, '.htaccess');
+
+	if (file_exists($htaccess_path)) {
+		return;
+	}
+
+	if (!is_writable($wordpressRoot)) {
+		$messages[] = 'Skipped .htaccess creation because the destination folder is not writable.';
+		return;
+	}
+
+	$rewrite_base = synchyInstallerDestinationPathFromUrl($destinationUrl);
+	$contents = <<<HTACCESS
+# BEGIN WordPress
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteBase {$rewrite_base}
+RewriteRule ^index\\.php$ - [L]
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule . {$rewrite_base}index.php [L]
+</IfModule>
+# END WordPress
+
+HTACCESS;
+
+	if (@file_put_contents($htaccess_path, $contents, LOCK_EX) === false) {
+		throw new RuntimeException('Could not create .htaccess in the destination folder.');
+	}
+
+	$messages[] = 'Created .htaccess with WordPress rewrite rules for ' . $rewrite_base . '.';
 }
 
 $messages = [];
@@ -1144,6 +1204,7 @@ if ($request_method === 'POST') {
 			$connection->close();
 			$connection = null;
 			synchyInstallerCopyFiles($extract_directory, $wordpress_root, $messages, $warnings);
+			synchyInstallerEnsureHtaccess($wordpress_root, $destination_url, $messages);
 			$restore_complete = true;
 			$messages[] = 'Restore complete. Review the destination site, then delete installer.php, the archive zip, and the hidden restore workspace.';
 		} catch (Throwable $throwable) {
