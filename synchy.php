@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.13
+ * Version: 0.7.14
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.13';
+const SYNCHY_VERSION = '0.7.14';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -227,6 +227,73 @@ function synchy_build_github_update_payload(array $release): object
 	];
 }
 
+function synchy_clear_github_update_cache(): void
+{
+	$config = synchy_get_github_update_config();
+
+	if (!empty($config['enabled'])) {
+		delete_site_transient(synchy_get_github_release_cache_key($config));
+	}
+
+	delete_site_transient('update_plugins');
+
+	if (function_exists('wp_clean_plugins_cache')) {
+		wp_clean_plugins_cache(true);
+	}
+}
+
+function synchy_refresh_plugin_update_state()
+{
+	$config = synchy_get_github_update_config();
+
+	if (empty($config['enabled'])) {
+		return new WP_Error('synchy_github_updates_disabled', __('GitHub updates are not configured for Synchy.', 'synchy'));
+	}
+
+	synchy_clear_github_update_cache();
+	$release = synchy_get_github_release_data(true);
+
+	if (is_wp_error($release)) {
+		return $release;
+	}
+
+	if (function_exists('wp_update_plugins')) {
+		wp_update_plugins();
+	}
+
+	return [
+		'release' => $release,
+		'update_available' => version_compare((string) ($release['version'] ?? SYNCHY_VERSION), SYNCHY_VERSION, '>'),
+	];
+}
+
+function synchy_get_plugin_upgrade_url(): string
+{
+	return wp_nonce_url(
+		self_admin_url('update.php?action=upgrade-plugin&plugin=' . rawurlencode(synchy_get_plugin_basename())),
+		'upgrade-plugin_' . synchy_get_plugin_basename()
+	);
+}
+
+function synchy_get_check_updates_url(string $redirect_to = ''): string
+{
+	$url = add_query_arg(
+		[
+			'action' => 'synchy_check_updates',
+		],
+		admin_url('admin-post.php')
+	);
+
+	if ($redirect_to !== '') {
+		$url = add_query_arg('redirect_to', $redirect_to, $url);
+	}
+
+	return wp_nonce_url(
+		$url,
+		'synchy_check_updates'
+	);
+}
+
 add_filter('pre_set_site_transient_update_plugins', function ($transient) {
 	if (!is_object($transient)) {
 		$transient = new stdClass();
@@ -316,6 +383,62 @@ add_action('upgrader_process_complete', function ($upgrader, array $hook_extra):
 	delete_site_transient(synchy_get_github_release_cache_key($config));
 	delete_site_transient('update_plugins');
 }, 10, 2);
+
+add_filter('plugin_action_links_' . plugin_basename(__FILE__), function (array $actions): array {
+	$links = [
+		'check_updates' => '<a href="' . esc_url(synchy_get_check_updates_url(self_admin_url('plugins.php'))) . '">' . esc_html__('Check for Updates', 'synchy') . '</a>',
+		'about' => '<a href="' . esc_url(admin_url('admin.php?page=synchy-settings')) . '">' . esc_html__('About', 'synchy') . '</a>',
+	];
+
+	return array_merge($links, $actions);
+});
+
+add_action('admin_post_synchy_check_updates', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_die(esc_html__('You are not allowed to check Synchy updates.', 'synchy'));
+	}
+
+	check_admin_referer('synchy_check_updates');
+
+	$redirect_to = isset($_GET['redirect_to']) ? wp_unslash((string) $_GET['redirect_to']) : '';
+	$redirect_to = wp_validate_redirect($redirect_to, admin_url('admin.php?page=synchy-settings'));
+
+	$result = synchy_refresh_plugin_update_state();
+
+	if (is_wp_error($result)) {
+		synchy_set_notice('error', $result->get_error_message());
+		wp_safe_redirect($redirect_to);
+		exit;
+	}
+
+	$release = is_array($result['release'] ?? null) ? $result['release'] : [];
+	$latest_version = (string) ($release['version'] ?? '');
+
+	if (!empty($result['update_available']) && $latest_version !== '') {
+		synchy_set_notice(
+			'success',
+			sprintf(
+				/* translators: %s: latest release version */
+				__('Synchy found a newer GitHub release: v%s. You can update from Plugins or the About page.', 'synchy'),
+				$latest_version
+			)
+		);
+	} elseif ($latest_version !== '') {
+		synchy_set_notice(
+			'success',
+			sprintf(
+				/* translators: %s: current plugin version */
+				__('Synchy is already on the latest GitHub release (v%s).', 'synchy'),
+				SYNCHY_VERSION
+			)
+		);
+	} else {
+		synchy_set_notice('success', __('Synchy checked GitHub successfully, but the latest release version could not be determined.', 'synchy'));
+	}
+
+	wp_safe_redirect($redirect_to);
+	exit;
+});
 
 function synchy_get_pages(): array
 {
@@ -1555,6 +1678,16 @@ function synchy_render_notice(): void
 	</div>
 	<?php
 }
+
+add_action('admin_notices', function (): void {
+	$page = isset($_GET['page']) ? sanitize_key(wp_unslash((string) $_GET['page'])) : '';
+
+	if ($page !== '' && str_starts_with($page, 'synchy')) {
+		return;
+	}
+
+	synchy_render_notice();
+});
 
 function synchy_get_last_export(): array
 {
@@ -5809,6 +5942,10 @@ function synchy_render_settings_page(array $current): void
 	$latest_release = synchy_get_github_release_data();
 	$latest_version = $latest_release instanceof WP_Error ? '' : (string) ($latest_release['version'] ?? '');
 	$latest_release_url = $latest_release instanceof WP_Error ? (string) ($github['html_url'] ?? '') : (string) ($latest_release['html_url'] ?? '');
+	$latest_release_error = $latest_release instanceof WP_Error ? $latest_release->get_error_message() : '';
+	$update_available = $latest_version !== '' && version_compare($latest_version, SYNCHY_VERSION, '>');
+	$check_updates_url = synchy_get_check_updates_url(admin_url('admin.php?page=synchy-settings'));
+	$plugin_upgrade_url = $update_available ? synchy_get_plugin_upgrade_url() : '';
 	?>
 	<div class="wrap synchy-admin">
 		<?php synchy_render_notice(); ?>
@@ -5867,7 +6004,48 @@ function synchy_render_settings_page(array $current): void
 								<?php endif; ?>
 							</strong>
 						</div>
+						<div>
+							<span class="synchy-export-meta__label"><?php esc_html_e('Update Status', 'synchy'); ?></span>
+							<strong>
+								<?php
+								if ($latest_release_error !== '') {
+									esc_html_e('GitHub check failed', 'synchy');
+								} elseif ($update_available) {
+									printf(
+										/* translators: %s: latest release version */
+										esc_html__('Update available: v%s', 'synchy'),
+										esc_html($latest_version)
+									);
+								} else {
+									esc_html_e('Up to date', 'synchy');
+								}
+								?>
+							</strong>
+						</div>
 					</div>
+					<p>
+						<a href="<?php echo esc_url($check_updates_url); ?>" class="button"><?php esc_html_e('Check for Updates', 'synchy'); ?></a>
+						<?php if ($plugin_upgrade_url !== '') : ?>
+							<a href="<?php echo esc_url($plugin_upgrade_url); ?>" class="button button-primary"><?php echo esc_html(sprintf(__('Update to v%s', 'synchy'), $latest_version)); ?></a>
+						<?php endif; ?>
+						<a href="<?php echo esc_url(self_admin_url('plugins.php')); ?>" class="button"><?php esc_html_e('Open Plugins', 'synchy'); ?></a>
+					</p>
+					<?php if ($latest_release_error !== '') : ?>
+						<p class="synchy-field-note"><?php echo esc_html($latest_release_error); ?></p>
+					<?php elseif ($update_available) : ?>
+						<p class="synchy-field-note">
+							<?php
+							printf(
+								/* translators: 1: current version, 2: latest version */
+								esc_html__('Synchy is on v%1$s and GitHub has v%2$s ready to install.', 'synchy'),
+								esc_html(SYNCHY_VERSION),
+								esc_html($latest_version)
+							);
+							?>
+						</p>
+					<?php else : ?>
+						<p class="synchy-field-note"><?php esc_html_e('Use the manual check if you want to force WordPress to refresh Synchy release data from GitHub right now.', 'synchy'); ?></p>
+					<?php endif; ?>
 				</div>
 
 				<div class="synchy-panel synchy-panel--muted">
