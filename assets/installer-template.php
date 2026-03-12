@@ -615,6 +615,7 @@ function synchyInstallerMaybeUnserialize(string $value, bool &$wasSerialized)
 
 function synchyInstallerPrepareDatabaseValue(string $value, string $search, string $replace, bool &$changed): string
 {
+	$wasSerialized = false;
 	$decoded = synchyInstallerMaybeUnserialize($value, $wasSerialized);
 	$updated = synchyInstallerReplaceValue($decoded, $search, $replace, $changed);
 
@@ -1061,6 +1062,9 @@ button:disabled{opacity:.55;cursor:not-allowed}
 label.checkbox{display:flex;gap:10px;align-items:flex-start;margin:14px 0;color:#304e55}
 label.checkbox input{width:auto;margin-top:4px}
 .meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.meta > div{min-width:0}
+.meta strong,.notice,.hint,p,li,code,a{overflow-wrap:anywhere;word-break:break-word}
+.meta strong{display:block}
 .field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 .field{display:grid;gap:6px}
 .field.full{grid-column:1 / -1}
@@ -1117,10 +1121,10 @@ a{color:#1e7bc8}
 					<span class="label">Package ID</span>
 					<strong><?php echo synchyInstallerEscape($package_id !== '' ? $package_id : 'Unavailable'); ?></strong>
 				</div>
-				<div>
-					<span class="label">Source Home URL</span>
-					<strong><?php echo synchyInstallerEscape($source_home !== '' ? $source_home : 'Unavailable'); ?></strong>
-				</div>
+					<div>
+						<span class="label">Source Package URL</span>
+						<strong><?php echo synchyInstallerEscape($source_home !== '' ? $source_home : 'Unavailable'); ?></strong>
+					</div>
 				<div>
 					<span class="label">Archive</span>
 					<strong><?php echo synchyInstallerEscape($archive_path !== '' ? basename($archive_path) : 'Unavailable'); ?></strong>
@@ -1143,10 +1147,10 @@ a{color:#1e7bc8}
 					<span class="label">WordPress Root</span>
 					<strong><?php echo synchyInstallerEscape($wordpress_root !== '' ? $wordpress_root : 'Unavailable'); ?></strong>
 				</div>
-				<div>
-					<span class="label">Installer URL</span>
-					<strong><?php echo synchyInstallerEscape($detected_destination_url !== '' ? $detected_destination_url : 'Unavailable'); ?></strong>
-				</div>
+					<div>
+						<span class="label">Detected Destination URL</span>
+						<strong><?php echo synchyInstallerEscape($detected_destination_url !== '' ? $detected_destination_url : 'Unavailable'); ?></strong>
+					</div>
 				<div>
 					<span class="label">Extract Workspace</span>
 					<strong><?php echo synchyInstallerEscape($extract_directory); ?></strong>
@@ -1226,11 +1230,12 @@ a{color:#1e7bc8}
 					<?php else : ?>
 						<input id="db_name" type="text" name="db_name" value="<?php echo synchyInstallerEscape($database_config['name']); ?>" placeholder="Select via Load Databases or type the database name">
 					<?php endif; ?>
-					<p class="hint">
-						Click <strong>Load Databases</strong> after entering host, username, and password to query available databases.
-						<?php if ($database_list_message !== '') : ?>
-							<br><?php echo synchyInstallerEscape($database_list_message); ?>
-						<?php endif; ?>
+						<p class="hint">
+							<strong>Load Databases</strong> is optional. It uses the host, username, and password above to ask MySQL which databases this user can access and fills the dropdown for you.
+							If you already know the destination database name, type it directly and skip that step.
+							<?php if ($database_list_message !== '') : ?>
+								<br><?php echo synchyInstallerEscape($database_list_message); ?>
+							<?php endif; ?>
 					</p>
 				</div>
 			</div>
