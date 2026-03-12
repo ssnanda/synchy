@@ -26,6 +26,12 @@
 
 	let currentJob = config.currentJob || null;
 	let pushInProgress = false;
+	let uploadEstimate = {
+		key: "",
+		lastBytes: 0,
+		lastTimestamp: 0,
+		bytesPerSecond: 0,
+	};
 
 	const escapeHtml = (value) =>
 		String(value)
@@ -60,6 +66,77 @@
 
 	window.addEventListener("beforeunload", handleBeforeUnload);
 
+	const formatDuration = (seconds) => {
+		if (!Number.isFinite(seconds) || seconds <= 0) {
+			return "";
+		}
+
+		const rounded = Math.max(1, Math.round(seconds));
+		const hours = Math.floor(rounded / 3600);
+		const minutes = Math.floor((rounded % 3600) / 60);
+		const secs = rounded % 60;
+
+		if (hours > 0) {
+			return `${hours}h ${minutes}m`;
+		}
+
+		if (minutes > 0) {
+			return `${minutes}m ${secs}s`;
+		}
+
+		return `${secs}s`;
+	};
+
+	const updateUploadEstimate = (job) => {
+		if (job.phase !== "uploading_archive" && job.phase !== "uploading_installer") {
+			uploadEstimate = {
+				key: "",
+				lastBytes: 0,
+				lastTimestamp: 0,
+				bytesPerSecond: 0,
+			};
+			return "";
+		}
+
+		const artifactBytesUploaded = Number(job.artifactBytesUploaded || 0);
+		const artifactBytesTotal = Number(job.artifactBytesTotal || 0);
+		const estimateKey = `${job.phase}:${job.currentArtifact || ""}:${artifactBytesTotal}`;
+		const now = Date.now();
+
+		if (
+			uploadEstimate.key !== estimateKey ||
+			artifactBytesUploaded < uploadEstimate.lastBytes
+		) {
+			uploadEstimate = {
+				key: estimateKey,
+				lastBytes: artifactBytesUploaded,
+				lastTimestamp: now,
+				bytesPerSecond: 0,
+			};
+			return "";
+		}
+
+		const elapsedSeconds = uploadEstimate.lastTimestamp > 0
+			? (now - uploadEstimate.lastTimestamp) / 1000
+			: 0;
+		const deltaBytes = artifactBytesUploaded - uploadEstimate.lastBytes;
+
+		if (deltaBytes > 0 && elapsedSeconds > 0.25) {
+			const instantRate = deltaBytes / elapsedSeconds;
+			uploadEstimate.bytesPerSecond = uploadEstimate.bytesPerSecond > 0
+				? (uploadEstimate.bytesPerSecond * 0.7) + (instantRate * 0.3)
+				: instantRate;
+			uploadEstimate.lastBytes = artifactBytesUploaded;
+			uploadEstimate.lastTimestamp = now;
+		}
+
+		if (uploadEstimate.bytesPerSecond <= 0 || artifactBytesUploaded <= 0 || artifactBytesUploaded >= artifactBytesTotal) {
+			return "";
+		}
+
+		return formatDuration((artifactBytesTotal - artifactBytesUploaded) / uploadEstimate.bytesPerSecond);
+	};
+
 	const setProgressDetail = (job) => {
 		if (!progressDetail) {
 			return;
@@ -76,9 +153,15 @@
 			const uploaded = artifactUploaded.toLocaleString();
 			const total = artifactTotal.toLocaleString();
 			const artifactPercent = Number(job.artifactProgress || 0);
-			progressDetail.textContent = `${artifactLabel} ${artifactPercent}% • ${config.strings.uploaded} ${uploaded} / ${total}`;
+			const timeRemaining = updateUploadEstimate(job);
+			const etaText = timeRemaining !== ""
+				? ` • ${config.strings.timeRemaining} ${timeRemaining}`
+				: "";
+			progressDetail.textContent = `${artifactLabel} ${artifactPercent}% • ${config.strings.uploaded} ${uploaded} / ${total}${etaText}`;
 			return;
 		}
+
+		updateUploadEstimate(job);
 
 		const uploaded = Number(job.bytesUploaded || 0).toLocaleString();
 		const total = Number(job.bytesTotal || 0).toLocaleString();
