@@ -178,6 +178,18 @@ function synchyInstallerReadWordPressConfigDefaults(string $root, string $packag
 	return $defaults;
 }
 
+function synchyInstallerIsWordPressRoot(string $root): bool
+{
+	if ($root === '' || !is_dir($root)) {
+		return false;
+	}
+
+	$config_path = synchyInstallerPath($root, 'wp-config.php');
+	$wp_admin = synchyInstallerPath($root, 'wp-admin');
+
+	return is_readable($config_path) && is_dir($wp_admin);
+}
+
 function synchyInstallerCurrentSiteUrl(): string
 {
 	$host = $_SERVER['HTTP_X_ORIGINAL_HOST'] ?? $_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? 'localhost';
@@ -969,6 +981,10 @@ if ($archive_path === '') {
 
 if ($wordpress_root === '') {
 	$errors[] = 'Could not detect the WordPress root above this installer location.';
+}
+
+if ($wordpress_root !== '' && !synchyInstallerIsWordPressRoot($wordpress_root)) {
+	$errors[] = 'This installer must live in the exact destination WordPress root. Move installer.php and the package zip into the target site root that already contains wp-config.php and wp-admin, then reload this page.';
 }
 
 if (!function_exists('mysqli_init')) {
