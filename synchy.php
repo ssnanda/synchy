@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.17
+ * Version: 0.7.18
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.17';
+const SYNCHY_VERSION = '0.7.18';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -6037,33 +6037,6 @@ function synchy_render_site_sync_page(array $current): void
 			<form method="post" action="options.php" class="synchy-form" data-synchy-site-sync-form>
 				<?php settings_fields('synchy_site_sync'); ?>
 
-				<div class="synchy-panel synchy-panel--wide">
-					<div class="synchy-stack synchy-stack--compact">
-						<div>
-							<h2><?php esc_html_e('What This Build Does', 'synchy'); ?></h2>
-							<p class="synchy-field-note"><?php echo esc_html($current['description']); ?></p>
-						</div>
-						<ul class="synchy-checklist synchy-checklist--detail">
-							<li>
-								<strong><?php esc_html_e('Authenticates against the destination site', 'synchy'); ?></strong>
-								<span><?php esc_html_e('Synchy connects with the destination username and WordPress application password over the REST API.', 'synchy'); ?></span>
-							</li>
-							<li>
-								<strong><?php esc_html_e('Builds a fresh full-site package locally', 'synchy'); ?></strong>
-								<span><?php esc_html_e('The same export engine powers this live push so you always send a complete package generated from the local site.', 'synchy'); ?></span>
-							</li>
-							<li>
-								<strong><?php esc_html_e('Uploads the package to the destination Synchy receiver', 'synchy'); ?></strong>
-								<span><?php esc_html_e('Archive and installer.php are transferred in chunks so large packages can move through normal HTTPS requests.', 'synchy'); ?></span>
-							</li>
-							<li>
-								<strong><?php esc_html_e('Deploys a manual restore installer to the destination root', 'synchy'); ?></strong>
-								<span><?php esc_html_e('After upload, Synchy tries to place the zip and installer.php in the destination WordPress root so you can launch the restore manually.', 'synchy'); ?></span>
-							</li>
-						</ul>
-					</div>
-				</div>
-
 				<div class="synchy-grid synchy-grid--upload-live">
 					<div class="synchy-panel synchy-panel--muted">
 							<h2><?php esc_html_e('Destination Connection', 'synchy'); ?></h2>
@@ -6207,6 +6180,33 @@ function synchy_render_site_sync_page(array $current): void
 								<li><?php esc_html_e('HTTPS chunk uploads depend on the destination host accepting request bodies at your configured chunk size.', 'synchy'); ?></li>
 							</ul>
 						</div>
+					</div>
+				</div>
+
+				<div class="synchy-panel synchy-panel--wide synchy-panel--muted">
+					<div class="synchy-stack synchy-stack--compact">
+						<div>
+							<h2><?php esc_html_e('What This Build Does', 'synchy'); ?></h2>
+							<p class="synchy-field-note"><?php echo esc_html($current['description']); ?></p>
+						</div>
+						<ul class="synchy-checklist synchy-checklist--detail">
+							<li>
+								<strong><?php esc_html_e('Authenticates against the destination site', 'synchy'); ?></strong>
+								<span><?php esc_html_e('Synchy connects with the destination username and WordPress application password over the REST API.', 'synchy'); ?></span>
+							</li>
+							<li>
+								<strong><?php esc_html_e('Builds a fresh full-site package locally', 'synchy'); ?></strong>
+								<span><?php esc_html_e('The same export engine powers this live push so you always send a complete package generated from the local site.', 'synchy'); ?></span>
+							</li>
+							<li>
+								<strong><?php esc_html_e('Uploads the package to the destination Synchy receiver', 'synchy'); ?></strong>
+								<span><?php esc_html_e('Archive and installer.php are transferred in chunks so large packages can move through normal HTTPS requests.', 'synchy'); ?></span>
+							</li>
+							<li>
+								<strong><?php esc_html_e('Deploys a manual restore installer to the destination root', 'synchy'); ?></strong>
+								<span><?php esc_html_e('After upload, Synchy tries to place the zip and installer.php in the destination WordPress root so you can launch the restore manually.', 'synchy'); ?></span>
+							</li>
+						</ul>
 					</div>
 				</div>
 
