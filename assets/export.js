@@ -34,6 +34,11 @@
 
 	let currentJob = config.currentJob || null;
 	let currentBrowsePath = outputDirectoryInput.value || "./";
+	let titleFlashTimer = null;
+	let titleFlashState = false;
+	let pendingReloadOnFocus = false;
+	let notificationRequested = false;
+	const originalTitle = document.title;
 
 	const escapeHtml = (value) =>
 		String(value)
@@ -56,6 +61,80 @@
 			.toLowerCase();
 
 		return slug || fallback;
+	};
+
+	const stopTitleAttention = () => {
+		if (titleFlashTimer) {
+			window.clearInterval(titleFlashTimer);
+			titleFlashTimer = null;
+		}
+
+		document.title = originalTitle;
+		titleFlashState = false;
+	};
+
+	const startTitleAttention = (attentionTitle) => {
+		if (!document.hidden && document.hasFocus()) {
+			return;
+		}
+
+		if (titleFlashTimer) {
+			return;
+		}
+
+		titleFlashTimer = window.setInterval(() => {
+			document.title = titleFlashState ? originalTitle : attentionTitle;
+			titleFlashState = !titleFlashState;
+		}, 1000);
+	};
+
+	const requestNotificationPermission = () => {
+		if (!("Notification" in window) || notificationRequested || Notification.permission !== "default") {
+			return;
+		}
+
+		notificationRequested = true;
+		Notification.requestPermission().catch(() => {});
+	};
+
+	const notifyCompletionState = (title, body) => {
+		if (!document.hidden && document.hasFocus()) {
+			return;
+		}
+
+		startTitleAttention(title);
+
+		if (!("Notification" in window) || Notification.permission !== "granted") {
+			return;
+		}
+
+		try {
+			const notice = new Notification(title, {
+				body,
+				tag: "synchy-export-status",
+				renotify: true,
+			});
+
+			notice.onclick = () => {
+				window.focus();
+				notice.close();
+			};
+		} catch (error) {
+			// Ignore notification API failures and rely on the flashing tab title.
+		}
+	};
+
+	const handleWindowFocus = () => {
+		if (document.hidden) {
+			return;
+		}
+
+		stopTitleAttention();
+
+		if (pendingReloadOnFocus) {
+			pendingReloadOnFocus = false;
+			window.setTimeout(() => window.location.reload(), 250);
+		}
 	};
 
 	const updatePackagePreview = () => {
@@ -193,7 +272,17 @@
 			}
 
 			if (currentJob.status === "complete") {
-				window.setTimeout(() => window.location.reload(), 700);
+				setRunningState(false);
+				notifyCompletionState(
+					config.strings.completeTitle,
+					currentJob.message || config.strings.completeBody
+				);
+
+				if (document.hidden || !document.hasFocus()) {
+					pendingReloadOnFocus = true;
+				} else {
+					window.setTimeout(() => window.location.reload(), 900);
+				}
 				return;
 			}
 
@@ -202,6 +291,7 @@
 			if (progressMessage) {
 				progressMessage.textContent = error.message;
 			}
+			notifyCompletionState(config.strings.errorTitle, error.message);
 			setRunningState(false);
 		}
 	};
@@ -280,11 +370,12 @@
 
 	runButton.addEventListener("click", async () => {
 		try {
+			requestNotificationPermission();
 			setRunningState(true);
 			renderProgress({
-				phaseLabel: "Preparing",
+				phaseLabel: config.strings.preparingLabel,
 				progress: 1,
-				message: "Starting export job...",
+				message: config.strings.startingExport,
 				fileCursor: 0,
 				fileCount: 0,
 			});
@@ -295,15 +386,19 @@
 			pollJob(currentJob.id);
 		} catch (error) {
 			renderProgress({
-				phaseLabel: "Error",
+				phaseLabel: config.strings.errorPhaseLabel,
 				progress: 100,
 				message: error.message,
 				fileCursor: 0,
 				fileCount: 0,
 			});
+			notifyCompletionState(config.strings.errorTitle, error.message);
 			setRunningState(false);
 		}
 	});
+
+	document.addEventListener("visibilitychange", handleWindowFocus);
+	window.addEventListener("focus", handleWindowFocus);
 
 	if (browseButton && modal) {
 		browseButton.addEventListener("click", () => {

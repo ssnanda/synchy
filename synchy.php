@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.18
+ * Version: 0.7.19
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.18';
+const SYNCHY_VERSION = '0.7.19';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -7380,6 +7380,12 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 			'strings' => [
 				'filesProcessed' => __('Files processed:', 'synchy'),
 				'unknownError' => __('Synchy hit an unexpected error while exporting.', 'synchy'),
+				'preparingLabel' => __('Preparing', 'synchy'),
+				'startingExport' => __('Starting export job...', 'synchy'),
+				'errorPhaseLabel' => __('Error', 'synchy'),
+				'completeTitle' => __('Synchy export complete', 'synchy'),
+				'completeBody' => __('Your export package is ready.', 'synchy'),
+				'errorTitle' => __('Synchy export needs attention', 'synchy'),
 			],
 		]
 	);
