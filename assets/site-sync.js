@@ -15,6 +15,8 @@
 	const progressPercent = document.querySelector("[data-synchy-site-sync-percent]");
 	const progressMessage = document.querySelector("[data-synchy-site-sync-message]");
 	const progressDetail = document.querySelector("[data-synchy-site-sync-detail]");
+	const progressTiming = document.querySelector("[data-synchy-site-sync-timing]");
+	const progressWarning = document.querySelector("[data-synchy-site-sync-warning]");
 	const resultPanel = document.querySelector("[data-synchy-site-sync-result]");
 	const resultBadge = document.querySelector("[data-synchy-site-sync-result-badge]");
 	const resultMessage = document.querySelector("[data-synchy-site-sync-result-message]");
@@ -137,6 +139,65 @@
 		return formatDuration((artifactBytesTotal - artifactBytesUploaded) / uploadEstimate.bytesPerSecond);
 	};
 
+	const getElapsedSeconds = (job) => {
+		const createdAt = job && job.createdAt ? Date.parse(job.createdAt) : NaN;
+
+		if (!Number.isFinite(createdAt)) {
+			return 0;
+		}
+
+		return Math.max(0, Math.floor((Date.now() - createdAt) / 1000));
+	};
+
+	const setProgressTiming = (job, timeRemaining = "") => {
+		if (!progressTiming) {
+			return;
+		}
+
+		const elapsedSeconds = getElapsedSeconds(job);
+		const elapsedText = elapsedSeconds > 0
+			? `${config.strings.timeSpent} ${formatDuration(elapsedSeconds)}`
+			: "";
+
+		if (job.status === "complete") {
+			progressTiming.textContent = elapsedText === ""
+				? ""
+				: `${config.strings.completedIn} ${formatDuration(elapsedSeconds)}`;
+			return;
+		}
+
+		if (elapsedText !== "" && timeRemaining !== "") {
+			progressTiming.textContent = `${elapsedText} • ${config.strings.timeRemaining} ${timeRemaining}`;
+			return;
+		}
+
+		progressTiming.textContent = elapsedText;
+	};
+
+	const setProgressWarning = (job) => {
+		if (!progressWarning) {
+			return;
+		}
+
+		progressWarning.style.display = job.status === "running" ? "" : "none";
+	};
+
+	const getPollDelay = (job) => {
+		if (!job || job.status !== "running") {
+			return 0;
+		}
+
+		if (job.phase === "uploading_archive" || job.phase === "uploading_installer") {
+			return 25;
+		}
+
+		if (job.phase === "finalizing_remote_package") {
+			return 50;
+		}
+
+		return 150;
+	};
+
 	const setProgressDetail = (job) => {
 		if (!progressDetail) {
 			return;
@@ -154,10 +215,8 @@
 			const total = artifactTotal.toLocaleString();
 			const artifactPercent = Number(job.artifactProgress || 0);
 			const timeRemaining = updateUploadEstimate(job);
-			const etaText = timeRemaining !== ""
-				? ` • ${config.strings.timeRemaining} ${timeRemaining}`
-				: "";
-			progressDetail.textContent = `${artifactLabel} ${artifactPercent}% • ${config.strings.uploaded} ${uploaded} / ${total}${etaText}`;
+			progressDetail.textContent = `${artifactLabel} ${artifactPercent}% • ${config.strings.uploaded} ${uploaded} / ${total}`;
+			setProgressTiming(job, timeRemaining);
 			return;
 		}
 
@@ -166,6 +225,7 @@
 		const uploaded = Number(job.bytesUploaded || 0).toLocaleString();
 		const total = Number(job.bytesTotal || 0).toLocaleString();
 		progressDetail.textContent = `${config.strings.uploaded} ${uploaded} / ${total}`;
+		setProgressTiming(job, "");
 	};
 
 	const renderProgress = (job) => {
@@ -192,6 +252,7 @@
 		}
 
 		setProgressDetail(job);
+		setProgressWarning(job);
 	};
 
 	const renderConnectionResult = (payload, isError = false) => {
@@ -279,7 +340,7 @@
 			renderProgress(currentJob);
 
 			if (currentJob.status === "running") {
-				window.setTimeout(() => pollJob(jobId), 800);
+				window.setTimeout(() => pollJob(jobId), getPollDelay(currentJob));
 				return;
 			}
 
@@ -345,6 +406,8 @@
 				message: "Starting Site Sync push...",
 				bytesUploaded: 0,
 				bytesTotal: 0,
+				createdAt: new Date().toISOString(),
+				status: "running",
 			});
 
 			const data = await request({
@@ -362,6 +425,7 @@
 				message: error.message,
 				bytesUploaded: 0,
 				bytesTotal: 0,
+				status: "error",
 			});
 			renderConnectionResult({ message: error.message }, true);
 		}

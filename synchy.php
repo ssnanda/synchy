@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.6.2
+ * Version: 0.6.3
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.6.2';
+const SYNCHY_VERSION = '0.6.3';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -1504,6 +1504,7 @@ function synchy_build_site_sync_job_response(array $job): array
 		'phaseLabel' => synchy_site_sync_phase_label((string) ($job['phase'] ?? '')),
 		'message' => (string) ($job['message'] ?? ''),
 		'progress' => $progress,
+		'createdAt' => (string) ($job['created_at'] ?? ''),
 		'progressLabel' => in_array((string) ($job['phase'] ?? ''), ['uploading_archive', 'uploading_installer'], true)
 			? sprintf(
 				/* translators: %d: overall progress percent */
@@ -3031,7 +3032,8 @@ function synchy_render_site_sync_page(array $current): void
 								}
 								?>
 							</p>
-							<p class="synchy-field-note">
+							<p class="synchy-progress__detail" data-synchy-site-sync-timing></p>
+							<p class="synchy-field-note" data-synchy-site-sync-warning>
 								<?php esc_html_e('Keep this tab open while Site Sync is pushing. Refreshing or leaving the page interrupts the upload.', 'synchy'); ?>
 							</p>
 						</div>
@@ -3615,7 +3617,9 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 				'currentJob' => synchy_build_site_sync_job_response(synchy_get_running_site_sync_job()),
 				'strings' => [
 					'uploaded' => __('Uploaded', 'synchy'),
+					'timeSpent' => __('Time spent', 'synchy'),
 					'timeRemaining' => __('Time remaining', 'synchy'),
+					'completedIn' => __('Completed in', 'synchy'),
 					'connectionReady' => __('Connection ready', 'synchy'),
 					'connectionError' => __('Connection failed', 'synchy'),
 					'unknownError' => __('Synchy hit an unexpected Site Sync error.', 'synchy'),
