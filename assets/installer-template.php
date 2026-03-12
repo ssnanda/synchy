@@ -918,6 +918,7 @@ $token_required = SYNCHY_INSTALLER_ACCESS_TOKEN !== '' && SYNCHY_INSTALLER_ACCES
 $provided_token = isset($_REQUEST['token']) ? trim((string) $_REQUEST['token']) : '';
 $authorized = !$token_required || ($provided_token !== '' && hash_equals(SYNCHY_INSTALLER_ACCESS_TOKEN, $provided_token));
 $detected_destination_url = synchyInstallerNormalizeUrl(synchyInstallerCurrentSiteUrl());
+$destination_url = synchyInstallerNormalizeUrl(synchyInstallerPostedString('destination_url', $detected_destination_url));
 $config_defaults = synchyInstallerReadWordPressConfigDefaults($wordpress_root, $source_db_prefix);
 $database_config = [
 	'host' => synchyInstallerPostedString('db_host', (string) ($config_defaults['host'] ?? 'localhost')),
@@ -975,12 +976,16 @@ if ($request_method === 'POST') {
 			$errors[] = 'Confirm that you created a backup of the destination site before running the restore.';
 		}
 
-		try {
-			synchyInstallerValidateDatabaseConfig($database_config);
+			try {
+				synchyInstallerValidateDatabaseConfig($database_config);
 
-			if ($database_config['host'] !== '' && $database_config['user'] !== '') {
-				try {
-					$available_databases = synchyInstallerLoadDatabases($database_config);
+				if ($destination_url === '') {
+					throw new RuntimeException('Enter the final destination URL before running the restore.');
+				}
+
+				if ($database_config['host'] !== '' && $database_config['user'] !== '') {
+					try {
+						$available_databases = synchyInstallerLoadDatabases($database_config);
 				} catch (Throwable $throwable) {
 					$warnings[] = 'Could not refresh the database list before restore: ' . $throwable->getMessage();
 				}
@@ -1002,10 +1007,10 @@ if ($request_method === 'POST') {
 			synchyInstallerDropDatabaseObjects($connection, $messages);
 			synchyInstallerImportDatabase($database_path, $connection, $messages);
 
-			$pairs = [
-				[$source_home, $detected_destination_url],
-				[$source_site, $detected_destination_url],
-			];
+				$pairs = [
+					[$source_home, $destination_url],
+					[$source_site, $destination_url],
+				];
 
 			foreach ($pairs as $pair) {
 				if ($pair[0] !== '' && $pair[1] !== '' && $pair[0] !== $pair[1]) {
@@ -1078,7 +1083,7 @@ a{color:#1e7bc8}
 <div class="shell">
 	<p class="eyebrow">Synchy Installer</p>
 	<h1>Manual Restore</h1>
-	<p>This installer restores the Synchy archive staged next to it. It overwrites the destination files and replaces the selected MySQL database with the package database dump.</p>
+		<p>This installer restores the Synchy archive staged next to it. It overwrites the destination files and replaces the selected MySQL database with the package database dump.</p>
 
 	<?php if ($token_required && !$authorized) : ?>
 		<div class="notice error">
@@ -1151,10 +1156,14 @@ a{color:#1e7bc8}
 						<span class="label">Detected Destination URL</span>
 						<strong><?php echo synchyInstallerEscape($detected_destination_url !== '' ? $detected_destination_url : 'Unavailable'); ?></strong>
 					</div>
-				<div>
-					<span class="label">Extract Workspace</span>
-					<strong><?php echo synchyInstallerEscape($extract_directory); ?></strong>
-				</div>
+					<div>
+						<span class="label">Restore Target URL</span>
+						<strong><?php echo synchyInstallerEscape($destination_url !== '' ? $destination_url : 'Unavailable'); ?></strong>
+					</div>
+					<div>
+						<span class="label">Extract Workspace</span>
+						<strong><?php echo synchyInstallerEscape($extract_directory); ?></strong>
+					</div>
 				<div>
 					<span class="label">Database Dump</span>
 					<strong><?php echo synchyInstallerEscape($database_path); ?></strong>
@@ -1165,15 +1174,15 @@ a{color:#1e7bc8}
 
 	<div class="card stack">
 		<h2>What Restore Does</h2>
-		<ul>
-			<li>Validates that the zip next to this installer matches the expected Synchy package.</li>
-			<li>Extracts the uploaded Synchy archive into a temporary workspace next to this installer.</li>
-			<li>Connects to the destination MySQL server using the credentials you provide here.</li>
-			<li>Drops all existing tables and views in the selected destination database, then imports the package dump.</li>
-			<li>Runs URL replacement from the source package URLs to the current destination URL.</li>
-			<li>Updates <code>wp-config.php</code> to use the selected database connection and package table prefix.</li>
-			<li>Copies the extracted files into the WordPress root while preserving the destination <code>wp-config.php</code>.</li>
-		</ul>
+			<ul>
+				<li>Validates that the zip next to this installer matches the expected Synchy package.</li>
+				<li>Extracts the uploaded Synchy archive into a temporary workspace next to this installer.</li>
+				<li>Connects to the destination MySQL server using the credentials you provide here.</li>
+				<li>Drops all existing tables and views in the selected destination database, then imports the package dump.</li>
+				<li>Runs URL replacement from the source package URLs to the destination URL you confirm below.</li>
+				<li>Updates <code>wp-config.php</code> to use the selected database connection and package table prefix.</li>
+				<li>Copies the extracted files into the WordPress root while preserving the destination <code>wp-config.php</code>.</li>
+			</ul>
 		<p><strong>Backup first.</strong> This restore overwrites the selected database and the destination site files.</p>
 	</div>
 
@@ -1194,11 +1203,16 @@ a{color:#1e7bc8}
 				<input type="hidden" name="token" value="<?php echo synchyInstallerEscape($provided_token); ?>">
 			<?php endif; ?>
 
-			<div class="field-grid">
-				<div class="field">
-					<label for="db_host"><span class="label">Database Host</span></label>
-					<input id="db_host" type="text" name="db_host" value="<?php echo synchyInstallerEscape($database_config['host']); ?>" placeholder="localhost">
-				</div>
+				<div class="field-grid">
+					<div class="field full">
+						<label for="destination_url"><span class="label">Destination URL</span></label>
+						<input id="destination_url" type="url" name="destination_url" value="<?php echo synchyInstallerEscape($destination_url); ?>" placeholder="https://staging.example.com">
+						<p class="hint">Synchy will replace the source package URLs with this value during restore. It defaults to the URL you opened this installer from, but you can correct it here before running the restore.</p>
+					</div>
+					<div class="field">
+						<label for="db_host"><span class="label">Database Host</span></label>
+						<input id="db_host" type="text" name="db_host" value="<?php echo synchyInstallerEscape($database_config['host']); ?>" placeholder="localhost">
+					</div>
 				<div class="field">
 					<label for="db_user"><span class="label">Database Username</span></label>
 					<input id="db_user" type="text" name="db_user" value="<?php echo synchyInstallerEscape($database_config['user']); ?>" placeholder="db_user">
@@ -1250,11 +1264,11 @@ a{color:#1e7bc8}
 				<button type="submit" name="action" value="run_restore" <?php echo (!$authorized || $errors !== []) ? 'disabled' : ''; ?>>Run Restore</button>
 			</div>
 		</form>
-	<?php else : ?>
-		<p>
-			<a href="<?php echo synchyInstallerEscape($detected_destination_url . '/wp-admin/'); ?>">Open WordPress admin</a>
-		</p>
-	<?php endif; ?>
+		<?php else : ?>
+			<p>
+				<a href="<?php echo synchyInstallerEscape($destination_url . '/wp-admin/'); ?>">Open WordPress admin</a>
+			</p>
+		<?php endif; ?>
 </div>
 </body>
 </html>
