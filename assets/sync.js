@@ -18,6 +18,7 @@
 	const previewBadge = document.querySelector("[data-synchy-sync-preview-badge]");
 	const previewMessage = document.querySelector("[data-synchy-sync-preview-message]");
 	const previewMeta = document.querySelector("[data-synchy-sync-preview-meta]");
+	const previewTreeContainer = document.querySelector("[data-synchy-sync-preview-tree]");
 	const statusBadge = document.querySelector("[data-synchy-sync-status-badge]");
 	const statusMessage = document.querySelector("[data-synchy-sync-status-message]");
 	const statusMeta = document.querySelector("[data-synchy-sync-status-meta]");
@@ -94,6 +95,25 @@
 		return `${secs}s`;
 	};
 
+	const formatBytes = (bytes) => {
+		const numeric = Number(bytes || 0);
+
+		if (!Number.isFinite(numeric) || numeric <= 0) {
+			return "0 B";
+		}
+
+		const units = ["B", "KB", "MB", "GB"];
+		let value = numeric;
+		let unitIndex = 0;
+
+		while (value >= 1024 && unitIndex < units.length - 1) {
+			value /= 1024;
+			unitIndex += 1;
+		}
+
+		return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+	};
+
 	const renderMeta = (container, items) => {
 		if (!container) {
 			return;
@@ -126,6 +146,18 @@
 			.filter(Boolean);
 
 	const getHasSelection = () => getSelectedScopeIds().length > 0;
+
+	const getPreviewSelectionInputs = () => Array.from(form.querySelectorAll("[data-synchy-preview-selection]"));
+
+	const getHasSelectedPreviewItems = () => {
+		const inputs = getPreviewSelectionInputs().filter((input) => input.type === "checkbox");
+
+		if (inputs.length === 0) {
+			return true;
+		}
+
+		return inputs.some((input) => input.checked);
+	};
 
 	const getHasPendingBaselineSelection = () =>
 		getSelectedScopeIds().some((scopeId) => pendingBaselineScopeIds.has(String(scopeId)));
@@ -166,7 +198,7 @@
 		const runLabel = getRunActionLabel();
 
 		previewButton.disabled = busy || !hasSelection;
-		runButton.disabled = busy || latestPreview === null || !hasSelection;
+		runButton.disabled = busy || latestPreview === null || !hasSelection || !getHasSelectedPreviewItems();
 		runButton.textContent = busy ? (config.strings.syncingAction || "Syncing...") : runLabel;
 
 		if (manualBaselineButton) {
@@ -221,11 +253,117 @@
 		]);
 	};
 
+	const renderPreviewTree = (preview) => {
+		if (!previewTreeContainer) {
+			return;
+		}
+
+		const tree = preview?.previewTree || null;
+		const fileGroups = Array.isArray(tree?.fileGroups) ? tree.fileGroups : [];
+		const databaseTables = Array.isArray(tree?.databaseTables) ? tree.databaseTables : [];
+
+		if (fileGroups.length === 0 && databaseTables.length === 0) {
+			previewTreeContainer.innerHTML = "";
+			previewTreeContainer.classList.add("is-hidden");
+			updateActionButtons();
+			return;
+		}
+
+		const existingFileSelection = new Set(
+			Array.from(form.querySelectorAll('input[name="synchy_sync_selected_file_scopes[]"]:checked')).map((input) => String(input.value || ""))
+		);
+		const existingTableSelection = new Set(
+			Array.from(form.querySelectorAll('input[name="synchy_sync_selected_db_tables[]"]:checked')).map((input) => String(input.value || ""))
+		);
+		const hasExistingSelection = existingFileSelection.size > 0 || existingTableSelection.size > 0;
+		const isChecked = (value, set) => (!hasExistingSelection ? true : set.has(String(value)));
+
+		const fileGroupHtml = fileGroups
+			.map((group) => {
+				const paths = Array.isArray(group.paths) ? group.paths : [];
+				const visiblePaths = paths.slice(0, 200);
+
+				return `
+					<div class="synchy-sync-tree__node">
+						<label class="synchy-sync-tree__toggle">
+							<input
+								type="checkbox"
+								name="synchy_sync_selected_file_scopes[]"
+								value="${escapeHtml(group.id || "")}"
+								data-synchy-preview-selection
+								${isChecked(group.id || "", existingFileSelection) ? "checked" : ""}
+							/>
+							<span>
+								<strong>${escapeHtml(group.label || "")}</strong>
+								<small>${escapeHtml(String(group.count || 0))} files • ${escapeHtml(formatBytes(group.bytes || 0))}</small>
+							</span>
+						</label>
+						<details class="synchy-sync-tree__details">
+							<summary>${escapeHtml(config.strings.changedFiles || "Changed files")}</summary>
+							<ul class="synchy-sync-tree__list">
+								${visiblePaths.map((path) => `<li>${escapeHtml(path)}</li>`).join("")}
+								${paths.length > visiblePaths.length ? `<li>${escapeHtml(`... and ${paths.length - visiblePaths.length} more files in this section.`)}</li>` : ""}
+							</ul>
+						</details>
+					</div>
+				`;
+			})
+			.join("");
+
+		const dbTableHtml = databaseTables
+			.map((table) => {
+				const rowIds = Array.isArray(table.rowIds) ? table.rowIds : [];
+
+				return `
+					<div class="synchy-sync-tree__node">
+						<label class="synchy-sync-tree__toggle">
+							<input
+								type="checkbox"
+								name="synchy_sync_selected_db_tables[]"
+								value="${escapeHtml(table.table || "")}"
+								data-synchy-preview-selection
+								${isChecked(table.table || "", existingTableSelection) ? "checked" : ""}
+							/>
+							<span>
+								<strong>${escapeHtml(table.label || "")}</strong>
+								<small>${escapeHtml(String(table.rowCount || 0))} rows${table.scopeLabel ? ` • ${escapeHtml(table.scopeLabel)}` : ""}</small>
+							</span>
+						</label>
+						${rowIds.length > 0 ? `<p class="synchy-sync-tree__sample">${escapeHtml(config.strings.sampleRowIds || "Sample row IDs")}: ${escapeHtml(rowIds.join(", "))}</p>` : ""}
+					</div>
+				`;
+			})
+			.join("");
+
+		previewTreeContainer.innerHTML = `
+			<input type="hidden" name="synchy_sync_preview_selection_present" value="1" data-synchy-preview-selection-marker />
+			<div class="synchy-sync-tree__header">
+				<h3>${escapeHtml(config.strings.previewSelectionTitle || "Choose What This Sync Sends")}</h3>
+				<p>${escapeHtml(config.strings.previewSelectionHelp || "Files are selectable by section. Database changes are selectable by table.")}</p>
+			</div>
+			${fileGroups.length > 0 ? `
+				<div class="synchy-sync-tree__section">
+					<h4>${escapeHtml(config.strings.files || "Files")}</h4>
+					${fileGroupHtml}
+				</div>
+			` : ""}
+			${databaseTables.length > 0 ? `
+				<div class="synchy-sync-tree__section">
+					<h4>${escapeHtml(config.strings.dbTables || "Database tables")}</h4>
+					${dbTableHtml}
+				</div>
+			` : ""}
+		`;
+		previewTreeContainer.classList.remove("is-hidden");
+		updateActionButtons();
+	};
+
 	const renderPreview = (preview) => {
 		if (!preview) {
 			previewBadge.textContent = "";
 			previewMessage.textContent = config.strings.previewDefault || "Run Preview Changes to review changed files and database rows before syncing.";
 			renderMeta(previewMeta, []);
+			renderPreviewTree(null);
 			return;
 		}
 
@@ -262,6 +400,7 @@
 			{ label: config.strings.tableUpdates || "Table updates", value: tableSummary || "None", html: true },
 			{ label: config.strings.sampleFiles || "Sample files", value: fileSummary || "None", html: true },
 		]);
+		renderPreviewTree(preview);
 	};
 
 	const getStatusBadge = (status) => {
@@ -444,11 +583,14 @@
 
 		const destinationUrl = destinationUrlInput?.value?.trim() || "";
 		const scopeLabels = getSelectedScopeLabels();
+		const selectedFileSections = form.querySelectorAll('input[name="synchy_sync_selected_file_scopes[]"]:checked').length;
+		const selectedDbTables = form.querySelectorAll('input[name="synchy_sync_selected_db_tables[]"]:checked').length;
 		const confirmMessage = [
 			config.strings.confirmSync || "Sync the previewed changes to the destination site now?",
 			"",
 			`Destination: ${destinationUrl || "Not set"}`,
 			`Scopes: ${scopeLabels.join(", ") || "None"}`,
+			`Selected preview items: ${selectedFileSections} file sections, ${selectedDbTables} DB tables`,
 		].join("\n");
 
 		if (!window.confirm(confirmMessage)) {
@@ -481,12 +623,22 @@
 		}
 	};
 
-	form.addEventListener("input", () => {
+	form.addEventListener("input", (event) => {
+		if (event.target?.matches("[data-synchy-preview-selection]")) {
+			updateActionButtons();
+			return;
+		}
+
 		clearPreview();
 		updateTargetNote();
 		updateActionButtons();
 	});
-	form.addEventListener("change", () => {
+	form.addEventListener("change", (event) => {
+		if (event.target?.matches("[data-synchy-preview-selection]")) {
+			updateActionButtons();
+			return;
+		}
+
 		clearPreview();
 		updateTargetNote();
 		updateScopeCards();
