@@ -1450,6 +1450,57 @@ a{color:#1e7bc8}
 		</div>
 	<?php endif; ?>
 
+	<?php if ($restore_complete && !$cleanup_complete) : ?>
+		<div class="card stack">
+			<h2>Cleanup Files</h2>
+			<p>Use the button below to remove the temporary Synchy restore files from this destination. Synchy keeps any <code>wp-config.php.synchy-*.bak</code> backup file in place so you can recover it manually if needed.</p>
+			<?php if ($cleanup_targets === []) : ?>
+				<div class="notice info">No Synchy cleanup files were found at this location.</div>
+			<?php else : ?>
+				<ul class="cleanup-list">
+					<?php foreach ($cleanup_targets as $target) : ?>
+						<li>
+							<strong><?php echo synchyInstallerEscape((string) ($target['label'] ?? 'Cleanup item')); ?></strong>
+							<span><?php echo synchyInstallerEscape((string) ($target['path'] ?? '')); ?></span>
+						</li>
+					<?php endforeach; ?>
+				</ul>
+				<form method="post">
+					<?php if ($provided_token !== '') : ?>
+						<input type="hidden" name="token" value="<?php echo synchyInstallerEscape($provided_token); ?>">
+					<?php endif; ?>
+					<div class="actions">
+						<button type="submit" name="action" value="cleanup_after_restore">Delete Cleanup Files</button>
+						<a href="<?php echo synchyInstallerEscape($destination_url !== '' ? $destination_url . '/' : './'); ?>">Open site</a>
+						<a href="<?php echo synchyInstallerEscape($destination_url !== '' ? $destination_url . '/wp-admin/' : './wp-admin/'); ?>">Open WordPress admin</a>
+					</div>
+				</form>
+			<?php endif; ?>
+		</div>
+	<?php endif; ?>
+
+	<?php if ($cleanup_messages !== []) : ?>
+		<div class="card stack">
+			<h2>Cleanup Log</h2>
+			<ul>
+				<?php foreach ($cleanup_messages as $message) : ?>
+					<li><?php echo synchyInstallerEscape($message); ?></li>
+				<?php endforeach; ?>
+			</ul>
+		</div>
+	<?php endif; ?>
+
+	<?php if ($messages !== []) : ?>
+		<div class="card stack">
+			<h2>Restore Log</h2>
+			<ul>
+				<?php foreach ($messages as $message) : ?>
+					<li><?php echo synchyInstallerEscape($message); ?></li>
+				<?php endforeach; ?>
+			</ul>
+		</div>
+	<?php endif; ?>
+
 	<div class="grid">
 		<div class="card">
 			<h2>Package</h2>
@@ -1521,57 +1572,6 @@ a{color:#1e7bc8}
 			</ul>
 		<p><strong>Backup first.</strong> This restore overwrites the selected database and the destination site files.</p>
 	</div>
-
-	<?php if ($messages !== []) : ?>
-		<div class="card stack">
-			<h2>Restore Log</h2>
-			<ul>
-				<?php foreach ($messages as $message) : ?>
-					<li><?php echo synchyInstallerEscape($message); ?></li>
-				<?php endforeach; ?>
-			</ul>
-		</div>
-	<?php endif; ?>
-
-	<?php if ($cleanup_messages !== []) : ?>
-		<div class="card stack">
-			<h2>Cleanup Log</h2>
-			<ul>
-				<?php foreach ($cleanup_messages as $message) : ?>
-					<li><?php echo synchyInstallerEscape($message); ?></li>
-				<?php endforeach; ?>
-			</ul>
-		</div>
-	<?php endif; ?>
-
-	<?php if ($restore_complete && !$cleanup_complete) : ?>
-		<div class="card stack">
-			<h2>Cleanup Files</h2>
-			<p>Use the button below to remove the temporary Synchy restore files from this destination. Synchy keeps any <code>wp-config.php.synchy-*.bak</code> backup file in place so you can recover it manually if needed.</p>
-			<?php if ($cleanup_targets === []) : ?>
-				<div class="notice info">No Synchy cleanup files were found at this location.</div>
-			<?php else : ?>
-				<ul class="cleanup-list">
-					<?php foreach ($cleanup_targets as $target) : ?>
-						<li>
-							<strong><?php echo synchyInstallerEscape((string) ($target['label'] ?? 'Cleanup item')); ?></strong>
-							<span><?php echo synchyInstallerEscape((string) ($target['path'] ?? '')); ?></span>
-						</li>
-					<?php endforeach; ?>
-				</ul>
-				<form method="post">
-					<?php if ($provided_token !== '') : ?>
-						<input type="hidden" name="token" value="<?php echo synchyInstallerEscape($provided_token); ?>">
-					<?php endif; ?>
-					<div class="actions">
-						<button type="submit" name="action" value="cleanup_after_restore">Delete Cleanup Files</button>
-						<a href="<?php echo synchyInstallerEscape($destination_url !== '' ? $destination_url . '/' : './'); ?>">Open site</a>
-						<a href="<?php echo synchyInstallerEscape($destination_url !== '' ? $destination_url . '/wp-admin/' : './wp-admin/'); ?>">Open WordPress admin</a>
-					</div>
-				</form>
-			<?php endif; ?>
-		</div>
-	<?php endif; ?>
 
 	<?php if (!$restore_complete && !$cleanup_complete) : ?>
 		<form method="post">
