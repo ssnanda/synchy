@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.22
+ * Version: 0.7.23
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.22';
+const SYNCHY_VERSION = '0.7.23';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -6257,25 +6257,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 			<form method="post" action="options.php" class="synchy-form" data-synchy-sync-form>
 				<?php settings_fields('synchy_site_sync'); ?>
 
-				<div class="synchy-grid synchy-grid--export">
-					<div class="synchy-panel">
-						<h2><?php esc_html_e('What Sync Does', 'synchy'); ?></h2>
-						<ul class="synchy-checklist synchy-checklist--detail">
-							<li>
-								<strong><?php esc_html_e('First Sync builds a baseline', 'synchy'); ?></strong>
-								<span><?php esc_html_e('The first successful Sync sends all targeted plugins, the active theme, uploads, and the selected WordPress data tables.', 'synchy'); ?></span>
-							</li>
-							<li>
-								<strong><?php esc_html_e('Every later Sync sends deltas only', 'synchy'); ?></strong>
-								<span><?php esc_html_e('Synchy detects changed files plus changed posts, postmeta, options, terms, taxonomies, and relationships since the last successful Sync.', 'synchy'); ?></span>
-							</li>
-							<li>
-								<strong><?php esc_html_e('Live applies changes directly', 'synchy'); ?></strong>
-								<span><?php esc_html_e('The destination extracts the changed files into wp-content, safely rewrites URLs and paths in changed data, applies the SQL delta, then clears caches.', 'synchy'); ?></span>
-							</li>
-						</ul>
-					</div>
-
+				<div class="synchy-grid synchy-grid--upload-live">
 					<div class="synchy-panel synchy-panel--muted">
 						<h2><?php esc_html_e('Destination Connection', 'synchy'); ?></h2>
 						<div class="synchy-field">
@@ -6343,16 +6325,53 @@ function synchy_render_incremental_site_sync_page(array $current): void
 							</div>
 						</div>
 					</div>
-				</div>
-
-				<div class="synchy-panel synchy-panel--wide synchy-site-sync-result is-hidden" data-synchy-sync-connection-result>
-					<div class="synchy-stack synchy-stack--compact">
-						<div class="synchy-stack__split">
-							<h2><?php esc_html_e('Connection Check', 'synchy'); ?></h2>
-							<span class="synchy-badge" data-synchy-sync-connection-badge><?php esc_html_e('Pending', 'synchy'); ?></span>
+					<div class="synchy-stack">
+						<div class="synchy-panel synchy-site-sync-result is-hidden" data-synchy-sync-connection-result>
+							<div class="synchy-stack synchy-stack--compact">
+								<div class="synchy-stack__split">
+									<h2><?php esc_html_e('Connection Check', 'synchy'); ?></h2>
+									<span class="synchy-badge" data-synchy-sync-connection-badge><?php esc_html_e('Pending', 'synchy'); ?></span>
+								</div>
+								<p class="synchy-field-note" data-synchy-sync-connection-message><?php esc_html_e('Use Test Connection to verify the destination Synchy receiver.', 'synchy'); ?></p>
+								<div class="synchy-export-meta" data-synchy-sync-connection-meta></div>
+							</div>
 						</div>
-						<p class="synchy-field-note" data-synchy-sync-connection-message><?php esc_html_e('Use Test Connection to verify the destination Synchy receiver.', 'synchy'); ?></p>
-						<div class="synchy-export-meta" data-synchy-sync-connection-meta></div>
+
+						<div class="synchy-panel synchy-panel--muted" data-synchy-sync-status-panel>
+							<div class="synchy-stack synchy-stack--compact">
+								<div class="synchy-stack__split">
+									<h2><?php esc_html_e('Last Sync Status', 'synchy'); ?></h2>
+									<span class="synchy-badge" data-synchy-sync-status-badge><?php echo esc_html($status_badge); ?></span>
+								</div>
+								<p data-synchy-sync-status-message><?php echo esc_html($status_message); ?></p>
+								<div class="synchy-export-meta" data-synchy-sync-status-meta>
+									<div>
+										<span class="synchy-export-meta__label"><?php esc_html_e('Last successful Sync', 'synchy'); ?></span>
+										<strong><?php echo esc_html($last_sync_time > 0 ? get_date_from_gmt(gmdate('Y-m-d H:i:s', $last_sync_time), get_option('date_format') . ' ' . get_option('time_format')) : __('Never', 'synchy')); ?></strong>
+									</div>
+									<div>
+										<span class="synchy-export-meta__label"><?php esc_html_e('Destination', 'synchy'); ?></span>
+										<strong><?php echo esc_html((string) ($status['destinationUrl'] ?? $options['destination_url'] ?? __('Not set', 'synchy'))); ?></strong>
+									</div>
+									<div>
+										<span class="synchy-export-meta__label"><?php esc_html_e('Files synced', 'synchy'); ?></span>
+										<strong><?php echo esc_html(number_format_i18n((int) ($status['filesSynced'] ?? 0))); ?></strong>
+									</div>
+									<div>
+										<span class="synchy-export-meta__label"><?php esc_html_e('DB rows synced', 'synchy'); ?></span>
+										<strong><?php echo esc_html(number_format_i18n((int) ($status['dbRowsSynced'] ?? 0))); ?></strong>
+									</div>
+									<div>
+										<span class="synchy-export-meta__label"><?php esc_html_e('Mode', 'synchy'); ?></span>
+										<strong><?php echo esc_html(ucfirst((string) ($status['mode'] ?? ($last_sync_time > 0 ? 'delta' : 'baseline')))); ?></strong>
+									</div>
+									<div>
+										<span class="synchy-export-meta__label"><?php esc_html_e('Duration', 'synchy'); ?></span>
+										<strong><?php echo esc_html(!empty($status['durationSeconds']) ? synchy_format_sync_duration((float) $status['durationSeconds']) : __('N/A', 'synchy')); ?></strong>
+									</div>
+								</div>
+							</div>
+						</div>
 					</div>
 				</div>
 
@@ -6378,40 +6397,22 @@ function synchy_render_incremental_site_sync_page(array $current): void
 						</ul>
 					</div>
 
-					<div class="synchy-panel synchy-panel--muted" data-synchy-sync-status-panel>
-						<div class="synchy-stack synchy-stack--compact">
-							<div class="synchy-stack__split">
-								<h2><?php esc_html_e('Last Sync Status', 'synchy'); ?></h2>
-								<span class="synchy-badge" data-synchy-sync-status-badge><?php echo esc_html($status_badge); ?></span>
-							</div>
-							<p data-synchy-sync-status-message><?php echo esc_html($status_message); ?></p>
-							<div class="synchy-export-meta" data-synchy-sync-status-meta>
-								<div>
-									<span class="synchy-export-meta__label"><?php esc_html_e('Last successful Sync', 'synchy'); ?></span>
-									<strong><?php echo esc_html($last_sync_time > 0 ? get_date_from_gmt(gmdate('Y-m-d H:i:s', $last_sync_time), get_option('date_format') . ' ' . get_option('time_format')) : __('Never', 'synchy')); ?></strong>
-								</div>
-								<div>
-									<span class="synchy-export-meta__label"><?php esc_html_e('Destination', 'synchy'); ?></span>
-									<strong><?php echo esc_html((string) ($status['destinationUrl'] ?? $options['destination_url'] ?? __('Not set', 'synchy'))); ?></strong>
-								</div>
-								<div>
-									<span class="synchy-export-meta__label"><?php esc_html_e('Files synced', 'synchy'); ?></span>
-									<strong><?php echo esc_html(number_format_i18n((int) ($status['filesSynced'] ?? 0))); ?></strong>
-								</div>
-								<div>
-									<span class="synchy-export-meta__label"><?php esc_html_e('DB rows synced', 'synchy'); ?></span>
-									<strong><?php echo esc_html(number_format_i18n((int) ($status['dbRowsSynced'] ?? 0))); ?></strong>
-								</div>
-								<div>
-									<span class="synchy-export-meta__label"><?php esc_html_e('Mode', 'synchy'); ?></span>
-									<strong><?php echo esc_html(ucfirst((string) ($status['mode'] ?? ($last_sync_time > 0 ? 'delta' : 'baseline')))); ?></strong>
-								</div>
-								<div>
-									<span class="synchy-export-meta__label"><?php esc_html_e('Duration', 'synchy'); ?></span>
-									<strong><?php echo esc_html(!empty($status['durationSeconds']) ? synchy_format_sync_duration((float) $status['durationSeconds']) : __('N/A', 'synchy')); ?></strong>
-								</div>
-							</div>
-						</div>
+					<div class="synchy-panel synchy-panel--muted">
+						<h2><?php esc_html_e('What Sync Does', 'synchy'); ?></h2>
+						<ul class="synchy-checklist synchy-checklist--detail">
+							<li>
+								<strong><?php esc_html_e('First Sync builds a baseline', 'synchy'); ?></strong>
+								<span><?php esc_html_e('The first successful Sync sends all targeted plugins, the active theme, uploads, and the selected WordPress data tables.', 'synchy'); ?></span>
+							</li>
+							<li>
+								<strong><?php esc_html_e('Every later Sync sends deltas only', 'synchy'); ?></strong>
+								<span><?php esc_html_e('Synchy detects changed files plus changed posts, postmeta, options, terms, taxonomies, and relationships since the last successful Sync.', 'synchy'); ?></span>
+							</li>
+							<li>
+								<strong><?php esc_html_e('Live applies changes directly', 'synchy'); ?></strong>
+								<span><?php esc_html_e('The destination extracts the changed files into wp-content, safely rewrites URLs and paths in changed data, applies the SQL delta, then clears caches.', 'synchy'); ?></span>
+							</li>
+						</ul>
 					</div>
 				</div>
 			</form>
