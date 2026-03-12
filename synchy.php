@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.16
+ * Version: 0.7.17
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.16';
+const SYNCHY_VERSION = '0.7.17';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -6037,9 +6037,12 @@ function synchy_render_site_sync_page(array $current): void
 			<form method="post" action="options.php" class="synchy-form" data-synchy-site-sync-form>
 				<?php settings_fields('synchy_site_sync'); ?>
 
-				<div class="synchy-grid synchy-grid--export">
-					<div class="synchy-panel">
-						<h2><?php esc_html_e('What This Build Does', 'synchy'); ?></h2>
+				<div class="synchy-panel synchy-panel--wide">
+					<div class="synchy-stack synchy-stack--compact">
+						<div>
+							<h2><?php esc_html_e('What This Build Does', 'synchy'); ?></h2>
+							<p class="synchy-field-note"><?php echo esc_html($current['description']); ?></p>
+						</div>
 						<ul class="synchy-checklist synchy-checklist--detail">
 							<li>
 								<strong><?php esc_html_e('Authenticates against the destination site', 'synchy'); ?></strong>
@@ -6059,8 +6062,10 @@ function synchy_render_site_sync_page(array $current): void
 							</li>
 						</ul>
 					</div>
+				</div>
 
-						<div class="synchy-panel synchy-panel--muted">
+				<div class="synchy-grid synchy-grid--upload-live">
+					<div class="synchy-panel synchy-panel--muted">
 							<h2><?php esc_html_e('Destination Connection', 'synchy'); ?></h2>
 						<div class="synchy-field">
 							<label class="synchy-label" for="synchy-destination-url"><?php esc_html_e('WordPress URL', 'synchy'); ?></label>
@@ -6169,39 +6174,39 @@ function synchy_render_site_sync_page(array $current): void
 									<?php endforeach; ?>
 								</div>
 							</div>
+					</div>
+
+					<div class="synchy-stack">
+						<div class="synchy-panel synchy-site-sync-result is-hidden" data-synchy-site-sync-result>
+							<div class="synchy-stack synchy-stack--compact">
+								<div class="synchy-stack__split">
+									<h2><?php esc_html_e('Destination Check', 'synchy'); ?></h2>
+									<span class="synchy-badge" data-synchy-site-sync-result-badge><?php esc_html_e('Pending', 'synchy'); ?></span>
+								</div>
+								<p class="synchy-field-note" data-synchy-site-sync-result-message><?php esc_html_e('Use Test Connection to verify the destination Synchy receiver.', 'synchy'); ?></p>
+								<div class="synchy-export-meta synchy-export-meta--wide" data-synchy-site-sync-result-meta></div>
+							</div>
 						</div>
-					</div>
 
-				<div class="synchy-panel synchy-panel--wide synchy-site-sync-result is-hidden" data-synchy-site-sync-result>
-					<div class="synchy-stack synchy-stack--compact">
-						<div class="synchy-stack__split">
-							<h2><?php esc_html_e('Destination Check', 'synchy'); ?></h2>
-							<span class="synchy-badge" data-synchy-site-sync-result-badge><?php esc_html_e('Pending', 'synchy'); ?></span>
+						<div class="synchy-panel">
+							<h2><?php esc_html_e('Destination Requirements', 'synchy'); ?></h2>
+							<ul class="synchy-checklist">
+								<li><?php esc_html_e('Synchy must be installed and active on the destination site.', 'synchy'); ?></li>
+								<li><?php esc_html_e('The destination user must be able to manage options so Synchy can verify and receive the push package.', 'synchy'); ?></li>
+								<li><?php esc_html_e('Application Passwords should be created on the live site user profile and used here instead of the raw wp-admin password.', 'synchy'); ?></li>
+								<li><?php esc_html_e('If you want Synchy to place installer.php and the zip directly in the destination root, that WordPress root must be writable by PHP.', 'synchy'); ?></li>
+							</ul>
 						</div>
-						<p class="synchy-field-note" data-synchy-site-sync-result-message><?php esc_html_e('Use Test Connection to verify the destination Synchy receiver.', 'synchy'); ?></p>
-						<div class="synchy-export-meta" data-synchy-site-sync-result-meta></div>
-					</div>
-				</div>
 
-				<div class="synchy-grid synchy-grid--export">
-					<div class="synchy-panel">
-						<h2><?php esc_html_e('Destination Requirements', 'synchy'); ?></h2>
-						<ul class="synchy-checklist">
-							<li><?php esc_html_e('Synchy must be installed and active on the destination site.', 'synchy'); ?></li>
-							<li><?php esc_html_e('The destination user must be able to manage options so Synchy can verify and receive the push package.', 'synchy'); ?></li>
-							<li><?php esc_html_e('Application Passwords should be created on the live site user profile and used here instead of the raw wp-admin password.', 'synchy'); ?></li>
-							<li><?php esc_html_e('If you want Synchy to place installer.php and the zip directly in the destination root, that WordPress root must be writable by PHP.', 'synchy'); ?></li>
-						</ul>
-					</div>
-
-					<div class="synchy-panel synchy-panel--muted">
-						<h2><?php esc_html_e('Current Limits', 'synchy'); ?></h2>
-						<ul class="synchy-checklist">
-							<li><?php esc_html_e('This live-push build authenticates, packages, uploads, and deploys a standalone installer to the destination root when that root is writable.', 'synchy'); ?></li>
-							<li><?php esc_html_e('The actual overwrite is still a manual installer run on the destination. One-click remote apply is not connected yet.', 'synchy'); ?></li>
-							<li><?php esc_html_e('If the destination root is not writable, Synchy leaves the package in wp-content/uploads/synchy-site-sync and you must move the zip and installer.php manually.', 'synchy'); ?></li>
-							<li><?php esc_html_e('HTTPS chunk uploads depend on the destination host accepting request bodies at your configured chunk size.', 'synchy'); ?></li>
-						</ul>
+						<div class="synchy-panel synchy-panel--muted">
+							<h2><?php esc_html_e('Current Limits', 'synchy'); ?></h2>
+							<ul class="synchy-checklist">
+								<li><?php esc_html_e('This live-push build authenticates, packages, uploads, and deploys a standalone installer to the destination root when that root is writable.', 'synchy'); ?></li>
+								<li><?php esc_html_e('The actual overwrite is still a manual installer run on the destination. One-click remote apply is not connected yet.', 'synchy'); ?></li>
+								<li><?php esc_html_e('If the destination root is not writable, Synchy leaves the package in wp-content/uploads/synchy-site-sync and you must move the zip and installer.php manually.', 'synchy'); ?></li>
+								<li><?php esc_html_e('HTTPS chunk uploads depend on the destination host accepting request bodies at your configured chunk size.', 'synchy'); ?></li>
+							</ul>
+						</div>
 					</div>
 				</div>
 

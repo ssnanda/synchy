@@ -263,6 +263,130 @@ function synchyInstallerRemoveTree(string $path): void
 	@rmdir($path);
 }
 
+function synchyInstallerExists(string $path): bool
+{
+	return $path !== '' && (is_file($path) || is_dir($path) || is_link($path));
+}
+
+function synchyInstallerDiscoverMatchingStageDirectories(string $wordpressRoot, string $archivePath): array
+{
+	$archiveFilename = $archivePath !== '' ? basename($archivePath) : '';
+	$roots = [
+		synchyInstallerPath($wordpressRoot, 'wp-content/uploads/synchy-import'),
+		synchyInstallerPath($wordpressRoot, 'wp-content/uploads/synchy-site-sync'),
+	];
+	$matches = [];
+
+	foreach ($roots as $root) {
+		if (!is_dir($root) || !is_readable($root)) {
+			continue;
+		}
+
+		$items = @scandir($root);
+
+		if (!is_array($items)) {
+			continue;
+		}
+
+		foreach ($items as $item) {
+			if ($item === '.' || $item === '..') {
+				continue;
+			}
+
+			$directory = synchyInstallerPath($root, $item);
+
+			if (!is_dir($directory)) {
+				continue;
+			}
+
+			$archiveMatch = $archiveFilename !== '' && is_file(synchyInstallerPath($directory, $archiveFilename));
+
+			if ($archiveMatch) {
+				$matches[] = $directory;
+			}
+		}
+	}
+
+	return array_values(array_unique($matches));
+}
+
+function synchyInstallerBuildCleanupTargets(string $wordpressRoot, string $packageDirectory, string $archivePath, string $workspaceRoot): array
+{
+	$targets = [];
+	$installerPath = str_replace('\\', '/', __FILE__);
+
+	if (synchyInstallerExists($archivePath)) {
+		$targets[] = [
+			'label' => 'Package zip',
+			'path' => $archivePath,
+			'type' => 'file',
+		];
+	}
+
+	if (synchyInstallerExists($workspaceRoot)) {
+		$targets[] = [
+			'label' => 'Restore workspace',
+			'path' => $workspaceRoot,
+			'type' => 'dir',
+		];
+	}
+
+	foreach (synchyInstallerDiscoverMatchingStageDirectories($wordpressRoot, $archivePath) as $directory) {
+		$targets[] = [
+			'label' => 'Matched staging session',
+			'path' => $directory,
+			'type' => 'dir',
+		];
+	}
+
+	if (synchyInstallerExists($installerPath)) {
+		$targets[] = [
+			'label' => 'installer.php',
+			'path' => $installerPath,
+			'type' => 'self',
+		];
+	}
+
+	return $targets;
+}
+
+function synchyInstallerDeleteCleanupTargets(array $targets, array &$messages): void
+{
+	usort(
+		$targets,
+		static function (array $a, array $b): int {
+			return (($a['type'] ?? '') === 'self') <=> (($b['type'] ?? '') === 'self');
+		}
+	);
+
+	foreach ($targets as $target) {
+		$path = isset($target['path']) ? (string) $target['path'] : '';
+		$type = isset($target['type']) ? (string) $target['type'] : 'file';
+		$label = isset($target['label']) ? (string) $target['label'] : 'Cleanup item';
+
+		if ($path === '' || !synchyInstallerExists($path)) {
+			continue;
+		}
+
+		if ($type === 'dir') {
+			synchyInstallerRemoveTree($path);
+
+			if (synchyInstallerExists($path)) {
+				throw new RuntimeException('Could not remove ' . $label . ' at ' . $path . '.');
+			}
+
+			$messages[] = 'Deleted ' . $label . ' at ' . $path . '.';
+			continue;
+		}
+
+		if (!@unlink($path)) {
+			throw new RuntimeException('Could not remove ' . $label . ' at ' . $path . '.');
+		}
+
+		$messages[] = 'Deleted ' . $label . ' at ' . $path . '.';
+	}
+}
+
 function synchyInstallerEnsureDirectory(string $path): void
 {
 	if (is_dir($path)) {
@@ -1075,9 +1199,11 @@ HTACCESS;
 }
 
 $messages = [];
+$cleanup_messages = [];
 $warnings = [];
 $errors = [];
 $restore_complete = false;
+$cleanup_complete = false;
 $database_list_message = '';
 $package_directory = str_replace('\\', '/', __DIR__);
 $archive_path = synchyInstallerFindArchivePath($package_directory);
@@ -1216,10 +1342,24 @@ if ($request_method === 'POST') {
 		}
 
 		synchyInstallerRemoveMaintenanceFile($wordpress_root);
+	} elseif ($action === 'cleanup_after_restore') {
+		try {
+			$cleanup_targets = synchyInstallerBuildCleanupTargets($wordpress_root, $package_directory, $archive_path, $workspace_root);
+
+			if ($cleanup_targets === []) {
+				$warnings[] = 'No Synchy cleanup files were found at this location.';
+			} else {
+				synchyInstallerDeleteCleanupTargets($cleanup_targets, $cleanup_messages);
+				$cleanup_complete = true;
+			}
+		} catch (Throwable $throwable) {
+			$errors[] = $throwable->getMessage();
+		}
 	}
 }
 
 $warnings = array_values(array_unique($warnings));
+$cleanup_targets = synchyInstallerBuildCleanupTargets($wordpress_root, $package_directory, $archive_path, $workspace_root);
 ?><!doctype html>
 <html lang="en">
 <head>
@@ -1240,6 +1380,7 @@ p{margin:0 0 12px;color:#4a676c}
 .notice.error{background:#fff4f4;color:#8a1f1f}
 .notice.success{background:#eefaf3;color:#19653f}
 .notice.warn{background:#fff7e8;color:#845a0f}
+.notice.info{background:#eef5fb;color:#184f7b}
 .stack{display:grid;gap:14px}
 code{padding:4px 8px;border-radius:10px;background:#f4f6f5}
 ul{margin:0;padding-left:18px}
@@ -1261,6 +1402,9 @@ label.checkbox input{width:auto;margin-top:4px}
 .hint{margin:0;color:#4a676c;font-size:14px}
 .actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:18px}
 a{color:#1e7bc8}
+.cleanup-list{display:grid;gap:10px;margin:0;padding:0;list-style:none}
+.cleanup-list li{display:grid;gap:4px;padding:12px 14px;border:1px solid #d7e1da;border-radius:14px;background:#fff}
+.cleanup-list strong{display:block}
 @media (max-width: 760px){body{padding:18px}.shell{padding:22px}.grid,.meta,.field-grid{grid-template-columns:1fr}h1{font-size:34px}}
 </style>
 </head>
@@ -1285,6 +1429,13 @@ a{color:#1e7bc8}
 		<div class="notice success">
 			<strong>Restore complete.</strong>
 			<p>The selected database was replaced and the destination files were overwritten from the package.</p>
+		</div>
+	<?php endif; ?>
+
+	<?php if ($cleanup_complete) : ?>
+		<div class="notice success">
+			<strong>Cleanup complete.</strong>
+			<p>Synchy removed the installer, package zip, restore workspace, and any matching staged session folders it found for this restore.</p>
 		</div>
 	<?php endif; ?>
 
@@ -1382,7 +1533,47 @@ a{color:#1e7bc8}
 		</div>
 	<?php endif; ?>
 
-	<?php if (!$restore_complete) : ?>
+	<?php if ($cleanup_messages !== []) : ?>
+		<div class="card stack">
+			<h2>Cleanup Log</h2>
+			<ul>
+				<?php foreach ($cleanup_messages as $message) : ?>
+					<li><?php echo synchyInstallerEscape($message); ?></li>
+				<?php endforeach; ?>
+			</ul>
+		</div>
+	<?php endif; ?>
+
+	<?php if ($restore_complete && !$cleanup_complete) : ?>
+		<div class="card stack">
+			<h2>Cleanup Files</h2>
+			<p>Use the button below to remove the temporary Synchy restore files from this destination. Synchy keeps any <code>wp-config.php.synchy-*.bak</code> backup file in place so you can recover it manually if needed.</p>
+			<?php if ($cleanup_targets === []) : ?>
+				<div class="notice info">No Synchy cleanup files were found at this location.</div>
+			<?php else : ?>
+				<ul class="cleanup-list">
+					<?php foreach ($cleanup_targets as $target) : ?>
+						<li>
+							<strong><?php echo synchyInstallerEscape((string) ($target['label'] ?? 'Cleanup item')); ?></strong>
+							<span><?php echo synchyInstallerEscape((string) ($target['path'] ?? '')); ?></span>
+						</li>
+					<?php endforeach; ?>
+				</ul>
+				<form method="post">
+					<?php if ($provided_token !== '') : ?>
+						<input type="hidden" name="token" value="<?php echo synchyInstallerEscape($provided_token); ?>">
+					<?php endif; ?>
+					<div class="actions">
+						<button type="submit" name="action" value="cleanup_after_restore">Delete Cleanup Files</button>
+						<a href="<?php echo synchyInstallerEscape($destination_url !== '' ? $destination_url . '/' : './'); ?>">Open site</a>
+						<a href="<?php echo synchyInstallerEscape($destination_url !== '' ? $destination_url . '/wp-admin/' : './wp-admin/'); ?>">Open WordPress admin</a>
+					</div>
+				</form>
+			<?php endif; ?>
+		</div>
+	<?php endif; ?>
+
+	<?php if (!$restore_complete && !$cleanup_complete) : ?>
 		<form method="post">
 			<?php if ($provided_token !== '') : ?>
 				<input type="hidden" name="token" value="<?php echo synchyInstallerEscape($provided_token); ?>">
@@ -1449,7 +1640,7 @@ a{color:#1e7bc8}
 				<button type="submit" name="action" value="run_restore" <?php echo (!$authorized || $errors !== []) ? 'disabled' : ''; ?>>Run Restore</button>
 			</div>
 		</form>
-		<?php else : ?>
+		<?php elseif ($restore_complete || $cleanup_complete) : ?>
 			<p>
 				<a href="<?php echo synchyInstallerEscape($destination_url . '/wp-admin/'); ?>">Open WordPress admin</a>
 			</p>
