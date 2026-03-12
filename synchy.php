@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.15
+ * Version: 0.7.16
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.15';
+const SYNCHY_VERSION = '0.7.16';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -22,6 +22,7 @@ const SYNCHY_SITE_SYNC_OPTIONS = 'synchy_site_sync_options';
 const SYNCHY_SITE_SYNC_JOB_OPTION = 'synchy_site_sync_job';
 const SYNCHY_SYNC_LAST_TIME_OPTION = 'syncy_last_sync_time';
 const SYNCHY_SYNC_STATUS_OPTION = 'synchy_sync_status';
+const SYNCHY_IMPORT_OPTIONS = 'synchy_import_options';
 const SYNCHY_IMPORT_RESULT_OPTION = 'synchy_import_result';
 const SYNCHY_NOTICE_PREFIX = 'synchy_admin_notice_';
 
@@ -1031,6 +1032,8 @@ function synchy_should_sync_option_name(string $option_name): bool
 		SYNCHY_EXPORT_OPTIONS,
 		SYNCHY_LAST_EXPORT_OPTION,
 		SYNCHY_EXPORT_JOB_OPTION,
+		SYNCHY_IMPORT_OPTIONS,
+		SYNCHY_IMPORT_RESULT_OPTION,
 		SYNCHY_SITE_SYNC_OPTIONS,
 		SYNCHY_SITE_SYNC_JOB_OPTION,
 		SYNCHY_SYNC_STATUS_OPTION,
@@ -5466,6 +5469,243 @@ function synchy_render_export_history(array $history, string $page_slug): void
 	<?php
 }
 
+function synchy_get_admin_page_url(string $page_slug): string
+{
+	return admin_url('admin.php?page=' . rawurlencode($page_slug));
+}
+
+function synchy_format_dashboard_timestamp(string $timestamp): string
+{
+	$timestamp = trim($timestamp);
+
+	if ($timestamp === '') {
+		return __('Never', 'synchy');
+	}
+
+	$unix = strtotime($timestamp);
+
+	if ($unix === false) {
+		return __('Unknown', 'synchy');
+	}
+
+	$current = current_time('timestamp');
+	$relative = human_time_diff($unix, $current);
+
+	return sprintf(
+		/* translators: 1: absolute datetime, 2: relative time */
+		__('%1$s (%2$s ago)', 'synchy'),
+		wp_date(get_option('date_format') . ' ' . get_option('time_format'), $unix),
+		$relative
+	);
+}
+
+function synchy_get_dashboard_import_summary(array $result): array
+{
+	$status = (string) ($result['status'] ?? '');
+
+	return match ($status) {
+		'ready' => [
+			'label' => __('Ready to restore', 'synchy'),
+			'detail' => !empty($result['installerUrl'])
+				? __('installer.php and the package zip are in place.', 'synchy')
+				: __('Package files were placed and are ready for restore.', 'synchy'),
+		],
+		'installer_ready' => [
+			'label' => __('Installer ready', 'synchy'),
+			'detail' => __('installer.php is in the root. Add the package zip next.', 'synchy'),
+		],
+		'staged_only' => [
+			'label' => __('Staged only', 'synchy'),
+			'detail' => __('Files were staged, but Synchy could not place them in the root automatically.', 'synchy'),
+		],
+		'error' => [
+			'label' => __('Import error', 'synchy'),
+			'detail' => (string) ($result['message'] ?? __('Synchy could not stage the import files.', 'synchy')),
+		],
+		default => [
+			'label' => __('No import staged', 'synchy'),
+			'detail' => __('Nothing is waiting in the Import workflow right now.', 'synchy'),
+		],
+	};
+}
+
+function synchy_get_dashboard_sync_summary(array $status): array
+{
+	$state = (string) ($status['status'] ?? '');
+	$timestamp = (string) ($status['at'] ?? '');
+
+	if ($state === '') {
+		return [
+			'label' => __('Never run', 'synchy'),
+			'detail' => __('No Sync changes run has completed yet.', 'synchy'),
+		];
+	}
+
+	$detail = (string) ($status['message'] ?? '');
+
+	if (!empty($status['destinationUrl'])) {
+		$detail = trim($detail . ' ' . sprintf(
+			/* translators: %s: destination url */
+			__('Destination: %s', 'synchy'),
+			(string) $status['destinationUrl']
+		));
+	}
+
+	return [
+		'label' => synchy_format_dashboard_timestamp($timestamp),
+		'detail' => $detail !== '' ? $detail : ucfirst($state),
+	];
+}
+
+function synchy_get_dashboard_activity_items(): array
+{
+	$items = [];
+	$export_job = synchy_get_running_export_job();
+
+	if ($export_job !== []) {
+		$items[] = [
+			'label' => __('Export', 'synchy'),
+			'progress' => max(0, min(100, (int) ($export_job['progress'] ?? 0))),
+			'message' => (string) ($export_job['message'] ?? __('Export is running.', 'synchy')),
+			'url' => synchy_get_admin_page_url('synchy-export'),
+		];
+	}
+
+	$upload_job = synchy_get_running_site_sync_job();
+
+	if ($upload_job !== []) {
+		$items[] = [
+			'label' => __('Upload to Live', 'synchy'),
+			'progress' => max(0, min(100, (int) ($upload_job['progress'] ?? 0))),
+			'message' => (string) ($upload_job['message'] ?? __('Upload to Live is running.', 'synchy')),
+			'url' => synchy_get_admin_page_url('synchy-push-live-site'),
+		];
+	}
+
+	return $items;
+}
+
+function synchy_render_dashboard_widget(): void
+{
+	$export_history = synchy_get_export_history();
+	$latest_export = $export_history[0] ?? [];
+	$recent_exports = array_slice($export_history, 0, 3);
+	$import_result = synchy_get_import_result();
+	$import_summary = synchy_get_dashboard_import_summary($import_result);
+	$sync_summary = synchy_get_dashboard_sync_summary(synchy_get_sync_status());
+	$activity_items = synchy_get_dashboard_activity_items();
+
+	$latest_export_label = $latest_export === []
+		? __('No exports yet', 'synchy')
+		: synchy_format_dashboard_timestamp((string) ($latest_export['created_at'] ?? ''));
+
+	$latest_export_detail = $latest_export === []
+		? __('Create your first Synchy package from Export.', 'synchy')
+		: sprintf(
+			/* translators: 1: archive size, 2: file count */
+			__('%1$s archive, %2$s files.', 'synchy'),
+			size_format((int) ($latest_export['archive_size'] ?? 0), 2),
+			number_format_i18n((int) ($latest_export['file_count'] ?? 0))
+		);
+	?>
+	<div class="synchy-dashboard-widget">
+		<div class="synchy-dashboard-widget__hero">
+			<div>
+				<p class="synchy-eyebrow"><?php esc_html_e('Backup Workflow', 'synchy'); ?></p>
+				<h3><?php esc_html_e('Synchy', 'synchy'); ?></h3>
+			</div>
+			<span class="synchy-badge"><?php echo esc_html('v' . SYNCHY_VERSION); ?></span>
+		</div>
+
+		<div class="synchy-dashboard-widget__summary">
+			<div class="synchy-dashboard-widget__stat">
+				<span class="synchy-dashboard-widget__label"><?php esc_html_e('Latest Export', 'synchy'); ?></span>
+				<strong><?php echo esc_html($latest_export_label); ?></strong>
+				<span><?php echo esc_html($latest_export_detail); ?></span>
+			</div>
+			<div class="synchy-dashboard-widget__stat">
+				<span class="synchy-dashboard-widget__label"><?php esc_html_e('Latest Import', 'synchy'); ?></span>
+				<strong><?php echo esc_html($import_summary['label']); ?></strong>
+				<span><?php echo esc_html($import_summary['detail']); ?></span>
+			</div>
+			<div class="synchy-dashboard-widget__stat">
+				<span class="synchy-dashboard-widget__label"><?php esc_html_e('Last Sync', 'synchy'); ?></span>
+				<strong><?php echo esc_html($sync_summary['label']); ?></strong>
+				<span><?php echo esc_html($sync_summary['detail']); ?></span>
+			</div>
+		</div>
+
+		<div class="synchy-dashboard-widget__section">
+			<div class="synchy-stack__split">
+				<strong><?php esc_html_e('Quick Actions', 'synchy'); ?></strong>
+				<a class="button button-primary" href="<?php echo esc_url(synchy_get_admin_page_url('synchy-export')); ?>">
+					<?php esc_html_e('Create Export', 'synchy'); ?>
+				</a>
+			</div>
+			<div class="synchy-dashboard-widget__actions">
+				<a class="button" href="<?php echo esc_url(synchy_get_admin_page_url('synchy-import')); ?>"><?php esc_html_e('Import', 'synchy'); ?></a>
+				<a class="button" href="<?php echo esc_url(synchy_get_admin_page_url('synchy-push-live-site')); ?>"><?php esc_html_e('Upload to Live', 'synchy'); ?></a>
+				<a class="button" href="<?php echo esc_url(synchy_get_admin_page_url('synchy-site-sync')); ?>"><?php esc_html_e('Sync', 'synchy'); ?></a>
+				<a class="button" href="<?php echo esc_url(synchy_get_admin_page_url('synchy-settings')); ?>"><?php esc_html_e('About', 'synchy'); ?></a>
+			</div>
+		</div>
+
+		<div class="synchy-dashboard-widget__section">
+			<strong><?php esc_html_e('Current Activity', 'synchy'); ?></strong>
+			<?php if ($activity_items === []) : ?>
+				<p class="synchy-dashboard-widget__empty"><?php esc_html_e('No Synchy jobs are running right now.', 'synchy'); ?></p>
+			<?php else : ?>
+				<div class="synchy-dashboard-widget__activities">
+					<?php foreach ($activity_items as $activity) : ?>
+						<div class="synchy-dashboard-widget__activity">
+							<div class="synchy-stack__split">
+								<strong><?php echo esc_html((string) $activity['label']); ?></strong>
+								<span class="synchy-badge"><?php echo esc_html((int) $activity['progress'] . '%'); ?></span>
+							</div>
+							<div class="synchy-progress__bar"><span style="width: <?php echo esc_attr((string) ((int) $activity['progress'])); ?>%;"></span></div>
+							<p class="synchy-progress__detail"><?php echo esc_html((string) $activity['message']); ?></p>
+							<p class="synchy-dashboard-widget__activity-link">
+								<a href="<?php echo esc_url((string) $activity['url']); ?>"><?php esc_html_e('Open workflow', 'synchy'); ?></a>
+							</p>
+						</div>
+					<?php endforeach; ?>
+				</div>
+			<?php endif; ?>
+		</div>
+
+		<div class="synchy-dashboard-widget__section">
+			<div class="synchy-stack__split">
+				<strong><?php esc_html_e('Recent Exports', 'synchy'); ?></strong>
+				<a href="<?php echo esc_url(synchy_get_admin_page_url('synchy-export')); ?>"><?php esc_html_e('Open Export', 'synchy'); ?></a>
+			</div>
+			<?php if ($recent_exports === []) : ?>
+				<p class="synchy-dashboard-widget__empty"><?php esc_html_e('No Synchy export packages are available yet.', 'synchy'); ?></p>
+			<?php else : ?>
+				<ul class="synchy-dashboard-widget__list">
+					<?php foreach ($recent_exports as $entry) : ?>
+						<?php
+						$package_id = (string) ($entry['package_id'] ?? '');
+						$package_name = (string) ($entry['package_name'] ?? $package_id);
+						?>
+						<li class="synchy-dashboard-widget__list-item">
+							<div>
+								<strong><?php echo esc_html($package_name); ?></strong>
+								<span><?php echo esc_html(synchy_format_dashboard_timestamp((string) ($entry['created_at'] ?? ''))); ?></span>
+							</div>
+							<?php if ($package_id !== '') : ?>
+								<a class="button button-small" href="<?php echo esc_url(synchy_get_download_url($package_id, 'archive')); ?>">
+									<?php esc_html_e('Archive', 'synchy'); ?>
+								</a>
+							<?php endif; ?>
+						</li>
+					<?php endforeach; ?>
+				</ul>
+			<?php endif; ?>
+		</div>
+	</div>
+	<?php
+}
+
 function synchy_get_browse_root_path(): string
 {
 	return wp_normalize_path(untrailingslashit(ABSPATH));
@@ -6437,6 +6677,21 @@ add_action('admin_menu', function (): void {
 	}
 });
 
+add_action('wp_dashboard_setup', function (): void {
+	if (!current_user_can('manage_options')) {
+		return;
+	}
+
+	add_meta_box(
+		'synchy_dashboard_widget',
+		__('Synchy', 'synchy'),
+		'synchy_render_dashboard_widget',
+		'dashboard',
+		'side',
+		'high'
+	);
+});
+
 add_action('admin_init', function (): void {
 	register_setting(
 		'synchy_export',
@@ -6970,7 +7225,10 @@ add_action('rest_api_init', function (): void {
 });
 
 add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
-	if (strpos($hook_suffix, 'synchy') === false) {
+	$is_synchy_screen = strpos($hook_suffix, 'synchy') !== false;
+	$is_dashboard_screen = $hook_suffix === 'index.php';
+
+	if (!$is_synchy_screen && !$is_dashboard_screen) {
 		return;
 	}
 
@@ -6983,6 +7241,10 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 			[],
 			(string) filemtime($style_path)
 		);
+	}
+
+	if ($is_dashboard_screen) {
+		return;
 	}
 
 	$page = isset($_GET['page']) ? sanitize_key((string) $_GET['page']) : '';
