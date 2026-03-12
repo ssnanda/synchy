@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.6.5
+ * Version: 0.6.7
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.6.5';
+const SYNCHY_VERSION = '0.6.7';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -332,9 +332,9 @@ function synchy_get_pages(): array
 		],
 		[
 			'slug' => 'synchy-import',
-			'title' => __('Manual Import & Restore', 'synchy'),
-			'menu_title' => __('Manual Import & Restore', 'synchy'),
-			'headline' => __('Manual Import & Restore', 'synchy'),
+			'title' => __('Manual Import', 'synchy'),
+			'menu_title' => __('Manual Import', 'synchy'),
+			'headline' => __('Manual Import', 'synchy'),
 			'description' => __('Restore a site from a Synchy package and safely replace the current install.', 'synchy'),
 		],
 		[
@@ -360,10 +360,10 @@ function synchy_get_pages(): array
 		],
 		[
 			'slug' => 'synchy-settings',
-			'title' => __('Settings', 'synchy'),
-			'menu_title' => __('Settings', 'synchy'),
-			'headline' => __('Settings', 'synchy'),
-			'description' => __('Configure storage paths, credentials, and default behavior for Synchy.', 'synchy'),
+			'title' => __('Settings & About', 'synchy'),
+			'menu_title' => __('Settings & About', 'synchy'),
+			'headline' => __('Settings & About', 'synchy'),
+			'description' => __('See Synchy configuration details, release/update wiring, and what each workflow area is responsible for.', 'synchy'),
 		],
 	];
 }
@@ -2882,7 +2882,7 @@ function synchy_render_export_page(array $current): void
 							<li><?php esc_html_e('The chosen export folder is excluded from the backup automatically if it lives inside this WordPress install.', 'synchy'); ?></li>
 							<li><?php esc_html_e('Duplicator backup folders remain excluded by default through wp-content/duplicator/.', 'synchy'); ?></li>
 							<li><?php esc_html_e('Runtime dependencies like Composer vendor folders should not be stripped by default.', 'synchy'); ?></li>
-							<li><?php esc_html_e('This package is not a Duplicator archive format. It will be restored through Synchy Manual Import & Restore, not Duplicator Import.', 'synchy'); ?></li>
+							<li><?php esc_html_e('This package is not a Duplicator archive format. It will be restored through Synchy Manual Import, not Duplicator Import.', 'synchy'); ?></li>
 						</ul>
 					</div>
 				</div>
@@ -3164,6 +3164,106 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	<?php
 }
 
+function synchy_render_settings_page(array $current): void
+{
+	$github = synchy_get_github_update_config();
+	$export_options = synchy_get_export_options();
+	$latest_release = synchy_get_github_release_data();
+	$latest_version = $latest_release instanceof WP_Error ? '' : (string) ($latest_release['version'] ?? '');
+	$latest_release_url = $latest_release instanceof WP_Error ? (string) ($github['html_url'] ?? '') : (string) ($latest_release['html_url'] ?? '');
+	?>
+	<div class="wrap synchy-admin">
+		<?php synchy_render_notice(); ?>
+		<div class="synchy-shell">
+			<div class="synchy-hero">
+				<div>
+					<p class="synchy-eyebrow"><?php esc_html_e('Plugin Info', 'synchy'); ?></p>
+					<h1><?php echo esc_html($current['headline']); ?></h1>
+					<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
+				</div>
+				<div class="synchy-status">
+					<span class="synchy-status__dot" aria-hidden="true"></span>
+					<?php echo esc_html(sprintf(__('v%s', 'synchy'), SYNCHY_VERSION)); ?>
+				</div>
+			</div>
+
+			<div class="synchy-grid synchy-grid--export">
+				<div class="synchy-panel">
+					<h2><?php esc_html_e('Settings Snapshot', 'synchy'); ?></h2>
+					<div class="synchy-export-meta">
+						<div>
+							<span class="synchy-export-meta__label"><?php esc_html_e('Current Version', 'synchy'); ?></span>
+							<strong><?php echo esc_html(SYNCHY_VERSION); ?></strong>
+						</div>
+						<div>
+							<span class="synchy-export-meta__label"><?php esc_html_e('Default Export Folder', 'synchy'); ?></span>
+							<strong><?php echo esc_html((string) $export_options['output_directory']); ?></strong>
+						</div>
+						<div>
+							<span class="synchy-export-meta__label"><?php esc_html_e('GitHub Repository', 'synchy'); ?></span>
+							<strong>
+								<?php if (!empty($github['html_url'])) : ?>
+									<a href="<?php echo esc_url((string) $github['html_url']); ?>" target="_blank" rel="noreferrer noopener"><?php echo esc_html((string) $github['repository']); ?></a>
+								<?php else : ?>
+									<?php esc_html_e('Not configured', 'synchy'); ?>
+								<?php endif; ?>
+							</strong>
+						</div>
+						<div>
+							<span class="synchy-export-meta__label"><?php esc_html_e('Release Asset', 'synchy'); ?></span>
+							<strong><?php echo esc_html((string) ($github['asset_name'] ?? '')); ?></strong>
+						</div>
+						<div>
+							<span class="synchy-export-meta__label"><?php esc_html_e('Update Branch', 'synchy'); ?></span>
+							<strong><?php echo esc_html((string) ($github['branch'] ?? 'main')); ?></strong>
+						</div>
+						<div>
+							<span class="synchy-export-meta__label"><?php esc_html_e('Latest Release', 'synchy'); ?></span>
+							<strong>
+								<?php if ($latest_version !== '' && $latest_release_url !== '') : ?>
+									<a href="<?php echo esc_url($latest_release_url); ?>" target="_blank" rel="noreferrer noopener"><?php echo esc_html($latest_version); ?></a>
+								<?php elseif ($latest_version !== '') : ?>
+									<?php echo esc_html($latest_version); ?>
+								<?php else : ?>
+									<?php esc_html_e('Unavailable', 'synchy'); ?>
+								<?php endif; ?>
+							</strong>
+						</div>
+					</div>
+				</div>
+
+				<div class="synchy-panel synchy-panel--muted">
+					<h2><?php esc_html_e('About Synchy', 'synchy'); ?></h2>
+					<p><?php esc_html_e('Synchy is being built as a WordPress backup, restore, and deployment tool with a clear split between manual package workflows and future incremental sync workflows.', 'synchy'); ?></p>
+					<ul class="synchy-checklist">
+						<li><?php esc_html_e('Manual Export builds a portable archive plus installer package.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Manual Import is the destination-side overwrite path for full package restores.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Push Backup to Live Site sends a full package to another WordPress install and stages the manual restore there.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Site Sync is the separate work area for incremental post-push changes without another full backup/restore cycle.', 'synchy'); ?></li>
+					</ul>
+				</div>
+			</div>
+
+			<div class="synchy-grid synchy-grid--export">
+				<div class="synchy-panel">
+					<h2><?php esc_html_e('Current Direction', 'synchy'); ?></h2>
+					<ul class="synchy-checklist">
+						<li><?php esc_html_e('Keep full-package backup and restore dependable first.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Use GitHub Releases as the update source for installed Synchy sites.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Move future live-site sync toward smaller incremental changes after an initial full push.', 'synchy'); ?></li>
+					</ul>
+				</div>
+
+				<div class="synchy-panel synchy-panel--muted">
+					<h2><?php esc_html_e('Next Plugin-Level Settings', 'synchy'); ?></h2>
+					<p><?php esc_html_e('This screen is also the home for future global Synchy settings, such as update behavior, default destinations, retention rules, and system-level diagnostics.', 'synchy'); ?></p>
+				</div>
+			</div>
+		</div>
+	</div>
+	<?php
+}
+
 function synchy_render_page(string $page_slug): void
 {
 	if (!current_user_can('manage_options')) {
@@ -3196,6 +3296,11 @@ function synchy_render_page(string $page_slug): void
 
 	if ($page_slug === 'synchy-site-sync') {
 		synchy_render_incremental_site_sync_page($current);
+		return;
+	}
+
+	if ($page_slug === 'synchy-settings') {
+		synchy_render_settings_page($current);
 		return;
 	}
 
