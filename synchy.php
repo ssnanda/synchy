@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.24
+ * Version: 0.7.25
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.24';
+const SYNCHY_VERSION = '0.7.25';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -826,9 +826,32 @@ function synchy_sanitize_site_sync_options($value): array
 	$sanitized['destination_application_password'] = $normalized_password;
 	$sanitized['verify_ssl'] = empty($value['verify_ssl']) ? 0 : 1;
 
-	foreach (synchy_get_sync_scope_definitions() as $scope) {
+	$scope_definitions = synchy_get_sync_scope_definitions();
+	$scope_input_present = false;
+
+	foreach ($scope_definitions as $scope) {
 		$option_key = (string) $scope['option_key'];
-		$sanitized[$option_key] = empty($value[$option_key]) ? 0 : 1;
+
+		if (array_key_exists($option_key, $value)) {
+			$scope_input_present = true;
+			break;
+		}
+	}
+
+	foreach ($scope_definitions as $scope) {
+		$option_key = (string) $scope['option_key'];
+
+		if ($scope_input_present) {
+			$sanitized[$option_key] = empty($value[$option_key]) ? 0 : 1;
+			continue;
+		}
+
+		if (array_key_exists($option_key, $existing)) {
+			$sanitized[$option_key] = empty($existing[$option_key]) ? 0 : 1;
+			continue;
+		}
+
+		$sanitized[$option_key] = 1;
 	}
 
 	return $sanitized;
