@@ -192,6 +192,29 @@
 	margin-bottom: 16px;
 }
 
+.synchy-field-inline {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.synchy-field-inline__input {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.synchy-field-label-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin-bottom: 8px;
+}
+
+.synchy-field-label-row .synchy-label {
+	margin-bottom: 0;
+}
+
 .synchy-label {
 	display: block;
 	margin-bottom: 8px;
@@ -433,6 +456,21 @@
 	font-weight: 700;
 }
 
+.synchy-badge--muted {
+	background: #ffffff;
+	color: #4a676c;
+}
+
+.synchy-badge--warning {
+	background: #fff5df;
+	color: #9b5c00;
+}
+
+.synchy-badge--connected {
+	background: #eaf8f0;
+	color: #1f8f5f;
+}
+
 .synchy-export-meta {
 	display: grid;
 	grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -468,6 +506,77 @@
 .synchy-text-break {
 	overflow-wrap: anywhere;
 	word-break: break-word;
+}
+
+.synchy-sync-scope-table {
+	display: grid;
+	gap: 10px;
+}
+
+.synchy-sync-scope-table__row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	align-items: center;
+	gap: 16px;
+	padding: 14px 16px;
+	border: 1px solid #d7e1da;
+	border-radius: 16px;
+	background: #ffffff;
+}
+
+.synchy-sync-scope-table__row.is-pending,
+.synchy-sync-scope-table__row.is-changed {
+	border-color: #dfc19a;
+	background: #fff8ef;
+}
+
+.synchy-sync-scope-table__name {
+	display: grid;
+	gap: 4px;
+}
+
+.synchy-sync-scope-table__name strong {
+	color: #12323b;
+	font-size: 15px;
+}
+
+.synchy-sync-scope-table__name span {
+	color: #517075;
+	font-size: 14px;
+	line-height: 1.45;
+}
+
+.synchy-sync-scope-table__status {
+	display: flex;
+	justify-content: flex-end;
+}
+
+.synchy-status-line {
+	margin: 0;
+	color: #12323b;
+	font-size: 14px;
+	font-weight: 600;
+	line-height: 1.6;
+}
+
+.synchy-stage-status--compact {
+	padding-top: 4px;
+}
+
+.synchy-export-stages--inline {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+
+.synchy-export-stages--inline .synchy-export-stage {
+	flex: 0 0 auto;
+	min-width: 0;
+	padding: 12px 14px;
+}
+
+.synchy-export-stages--inline .synchy-export-stage__content span {
+	display: none;
 }
 
 .synchy-downloads {

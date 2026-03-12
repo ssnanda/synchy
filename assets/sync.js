@@ -11,6 +11,11 @@
 	const previewButton = document.querySelector("[data-synchy-preview-sync]");
 	const runButton = document.querySelector("[data-synchy-run-sync]");
 	const manualBaselineButton = document.querySelector("[data-synchy-mark-baseline]");
+	const destinationUrlInput = document.querySelector("[data-synchy-sync-url]");
+	const usernameInput = document.querySelector("[data-synchy-sync-username]");
+	const passwordInput = document.querySelector("[data-synchy-sync-password]");
+	const verifySslInput = document.querySelector("[data-synchy-sync-verify-ssl]");
+	const inlineConnectionStatus = document.querySelector("[data-synchy-sync-inline-status]");
 	const progress = document.querySelector("[data-synchy-sync-progress]");
 	const progressBar = document.querySelector("[data-synchy-sync-progress-bar]");
 	const progressPhase = document.querySelector("[data-synchy-sync-progress-phase]");
@@ -24,12 +29,9 @@
 	const connectionMeta = document.querySelector("[data-synchy-sync-connection-meta]");
 	const previewBadge = document.querySelector("[data-synchy-sync-preview-badge]");
 	const previewMessage = document.querySelector("[data-synchy-sync-preview-message]");
-	const previewMeta = document.querySelector("[data-synchy-sync-preview-meta]");
 	const previewTreeContainer = document.querySelector("[data-synchy-sync-preview-tree]");
 	const statusBadge = document.querySelector("[data-synchy-sync-status-badge]");
-	const statusMessage = document.querySelector("[data-synchy-sync-status-message]");
-	const statusMeta = document.querySelector("[data-synchy-sync-status-meta]");
-	const destinationUrlInput = document.querySelector("[data-synchy-sync-url]");
+	const statusSummary = document.querySelector("[data-synchy-sync-status-summary]");
 	const targetNote = document.querySelector("[data-synchy-sync-target-note]");
 	const scopeInputs = Array.from(document.querySelectorAll("[data-synchy-sync-scope]"));
 
@@ -39,12 +41,14 @@
 		!previewButton ||
 		!runButton ||
 		!manualBaselineButton ||
+		!saveButton ||
+		!destinationUrlInput ||
+		!usernameInput ||
+		!passwordInput ||
 		!previewBadge ||
 		!previewMessage ||
-		!previewMeta ||
 		!statusBadge ||
-		!statusMessage ||
-		!statusMeta
+		!statusSummary
 	) {
 		return;
 	}
@@ -54,6 +58,12 @@
 	let pendingBaselineScopeIds = new Set((config.scopeStatus?.pendingBaselineScopeIds || []).map(String));
 	let changedScopeIds = new Set();
 	let currentJob = config.currentJob || null;
+	let connectionVerified = false;
+	const initialConnectionState = {
+		destinationUrl: destinationUrlInput.value.trim(),
+		username: usernameInput.value.trim(),
+		verifySsl: verifySslInput?.checked ? "1" : "0",
+	};
 
 	const escapeHtml = (value) =>
 		String(value)
@@ -157,7 +167,6 @@
 						<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
 						<div class="synchy-export-stage__content">
 							<strong>${escapeHtml(stage.label || "")}</strong>
-							<span>${escapeHtml(stage.description || "")}</span>
 						</div>
 					</div>
 				`
@@ -167,6 +176,7 @@
 
 	const renderProgress = (job) => {
 		if (!progress) {
+			renderStages(job);
 			return;
 		}
 
@@ -203,13 +213,12 @@
 
 	const getSelectedScopeIds = () =>
 		scopeInputs
-			.filter((input) => input.checked)
+			.filter((input) => String(input.value || "") === "1")
 			.map((input) => String(input.dataset.scopeId || ""));
 
 	const getSelectedScopeLabels = () =>
-		scopeInputs
-			.filter((input) => input.checked)
-			.map((input) => input.closest(".synchy-scope-card")?.querySelector("strong")?.textContent?.trim() || "")
+		getSelectedScopeIds()
+			.map((scopeId) => document.querySelector(`[data-synchy-sync-scope-row][data-scope-id="${scopeId}"] strong`)?.textContent?.trim() || "")
 			.filter(Boolean);
 
 	const getHasSelection = () => getSelectedScopeIds().length > 0;
@@ -243,50 +252,85 @@
 		targetNote.textContent = `Sync sends changes only to ${destination}.`;
 	};
 
-	const updateScopeCards = () => {
+	const getSelectedScopeIdSet = () => new Set(getSelectedScopeIds().map(String));
+
+	const updateScopeRows = () => {
 		scopeInputs.forEach((input) => {
-			const card = input.closest(".synchy-scope-card");
-			const status = card?.querySelector(".synchy-scope-card__status");
+			const row = document.querySelector(`[data-synchy-sync-scope-row][data-scope-id="${String(input.dataset.scopeId || "")}"]`);
+			const status = row?.querySelector("[data-synchy-sync-scope-status]");
 			const scopeId = String(input.dataset.scopeId || "");
 			const pending = pendingBaselineScopeIds.has(scopeId);
 			const changed = changedScopeIds.has(scopeId);
 
-			if (!card || !status) {
+			if (!row || !status) {
 				return;
 			}
 
-			card.classList.toggle("is-pending", pending);
-			card.classList.toggle("is-complete", !pending && !changed);
-			card.classList.toggle("is-changed", !pending && changed);
+			row.classList.toggle("is-pending", pending);
+			row.classList.toggle("is-complete", !pending && !changed);
+			row.classList.toggle("is-changed", !pending && changed);
+			status.classList.remove("synchy-badge--muted", "synchy-badge--warning", "synchy-badge--connected");
 
 			if (pending) {
 				status.textContent = config.strings.needsBaseline || "Needs baseline";
+				status.classList.add("synchy-badge--warning");
 				return;
 			}
 
 			if (changed) {
 				status.textContent = config.strings.pendingChanges || "Pending changes";
+				status.classList.add("synchy-badge--warning");
 				return;
 			}
 
 			status.textContent = latestPreview
 				? (config.strings.noChangesInScope || "No changes")
 				: (config.strings.readyForPreview || "Ready for preview");
+			status.classList.add("synchy-badge--muted");
 		});
 	};
 
-	const pruneScopeSelectionsFromPreview = () => {
-		scopeInputs.forEach((input) => {
-			const scopeId = String(input.dataset.scopeId || "");
+	const hasSavedPassword = () => passwordInput.dataset.hasSavedPassword === "1";
 
-			if (!scopeId || pendingBaselineScopeIds.has(scopeId)) {
-				return;
-			}
+	const getConnectionDirty = () =>
+		destinationUrlInput.value.trim() !== initialConnectionState.destinationUrl
+		|| usernameInput.value.trim() !== initialConnectionState.username
+		|| (verifySslInput?.checked ? "1" : "0") !== initialConnectionState.verifySsl
+		|| passwordInput.value.trim() !== "";
 
-			if (!changedScopeIds.has(scopeId)) {
-				input.checked = false;
-			}
-		});
+	const hasConnectionCoreValues = () =>
+		destinationUrlInput.value.trim() !== ""
+		&& usernameInput.value.trim() !== ""
+		&& (passwordInput.value.trim() !== "" || hasSavedPassword());
+
+	const updateConnectionControls = () => {
+		const dirty = getConnectionDirty();
+
+		saveButton.disabled = busy || !dirty;
+		testButton.disabled = busy || !hasConnectionCoreValues() || connectionVerified;
+
+		if (!inlineConnectionStatus) {
+			return;
+		}
+
+		inlineConnectionStatus.classList.remove("synchy-badge--muted", "synchy-badge--warning", "synchy-badge--connected");
+
+		if (connectionVerified) {
+			inlineConnectionStatus.textContent = config.strings.connected || "Connected";
+			inlineConnectionStatus.classList.add("synchy-badge--connected");
+			return;
+		}
+
+		if (dirty && hasConnectionCoreValues()) {
+			inlineConnectionStatus.textContent = config.strings.needsRetest || "Needs retest";
+			inlineConnectionStatus.classList.add("synchy-badge--warning");
+			return;
+		}
+
+		inlineConnectionStatus.textContent = hasConnectionCoreValues()
+			? (config.strings.notChecked || "Not checked")
+			: (config.strings.incomplete || "Incomplete");
+		inlineConnectionStatus.classList.add("synchy-badge--muted");
 	};
 
 	const updateActionButtons = () => {
@@ -306,12 +350,7 @@
 
 	const setBusy = (isBusy) => {
 		busy = isBusy;
-
-		if (saveButton) {
-			saveButton.disabled = isBusy;
-		}
-
-		testButton.disabled = isBusy;
+		updateConnectionControls();
 		updateActionButtons();
 	};
 
@@ -321,7 +360,7 @@
 		}
 
 		pendingBaselineScopeIds = new Set(scopeStatus.pendingBaselineScopeIds.map(String));
-		updateScopeCards();
+		updateScopeRows();
 		updateActionButtons();
 	};
 
@@ -372,8 +411,7 @@
 		});
 
 		changedScopeIds = nextChangedScopeIds;
-		pruneScopeSelectionsFromPreview();
-		updateScopeCards();
+		updateScopeRows();
 
 		if (fileGroups.length === 0 && databaseTables.length === 0) {
 			previewTreeContainer.innerHTML = "";
@@ -390,6 +428,7 @@
 		);
 		const hasExistingSelection = existingFileSelection.size > 0 || existingTableSelection.size > 0;
 		const isChecked = (value, set) => (!hasExistingSelection ? true : set.has(String(value)));
+		const selectedScopeIds = getSelectedScopeIdSet();
 
 		const fileGroupHtml = fileGroups
 			.map((group) => {
@@ -404,7 +443,9 @@
 								name="synchy_sync_selected_file_scopes[]"
 								value="${escapeHtml(group.id || "")}"
 								data-synchy-preview-selection
+								data-scope-id="${escapeHtml(group.id || "")}"
 								${isChecked(group.id || "", existingFileSelection) ? "checked" : ""}
+								${selectedScopeIds.has(String(group.id || "")) ? "" : "disabled"}
 							/>
 							<span>
 								<strong>${escapeHtml(group.label || "")}</strong>
@@ -435,7 +476,9 @@
 								name="synchy_sync_selected_db_tables[]"
 								value="${escapeHtml(table.table || "")}"
 								data-synchy-preview-selection
+								data-scope-id="${escapeHtml(table.scopeId || "")}"
 								${isChecked(table.table || "", existingTableSelection) ? "checked" : ""}
+								${selectedScopeIds.has(String(table.scopeId || "")) ? "" : "disabled"}
 							/>
 							<span>
 								<strong>${escapeHtml(table.label || "")}</strong>
@@ -450,10 +493,6 @@
 
 		previewTreeContainer.innerHTML = `
 			<input type="hidden" name="synchy_sync_preview_selection_present" value="1" data-synchy-preview-selection-marker />
-			<div class="synchy-sync-tree__header">
-				<h3>${escapeHtml(config.strings.previewSelectionTitle || "Choose What This Sync Sends")}</h3>
-				<p>${escapeHtml(config.strings.previewSelectionHelp || "Files are selectable by section. Database changes are selectable by table.")}</p>
-			</div>
 			${fileGroups.length > 0 ? `
 				<div class="synchy-sync-tree__section">
 					<h4>${escapeHtml(config.strings.files || "Files")}</h4>
@@ -474,8 +513,7 @@
 	const renderPreview = (preview) => {
 		if (!preview) {
 			previewBadge.textContent = "";
-			previewMessage.textContent = config.strings.previewDefault || "Run Preview Changes to review changed files and database rows before syncing.";
-			renderMeta(previewMeta, []);
+			previewMessage.textContent = config.strings.previewDefault || "Run Preview Changes to load the pending file sections and database tables.";
 			renderPreviewTree(null);
 			return;
 		}
@@ -485,42 +523,14 @@
 			: (config.strings.delta || "Delta");
 		const filesCount = Number(preview.filesCount || 0);
 		const dbRows = Number(preview.dbRows || 0);
-		const tableCounts = preview.tableCounts || {};
-		const sampleFiles = Array.isArray(preview.filePaths) ? preview.filePaths.slice(0, 8) : [];
-		const selectedScopes = Array.isArray(preview.selectedScopeLabels) ? preview.selectedScopeLabels : [];
-		const pendingScopes = Array.isArray(preview.pendingBaselineLabels) ? preview.pendingBaselineLabels : [];
-		const tree = preview?.previewTree || {};
-		const changedScopeLabels = Array.from(
-			new Set([
-				...(Array.isArray(tree.fileGroups) ? tree.fileGroups.map((group) => String(group?.label || "")).filter(Boolean) : []),
-				...(Array.isArray(tree.databaseTables) ? tree.databaseTables.map((table) => String(table?.scopeLabel || "")).filter(Boolean) : []),
-			])
-		);
-		const tableSummary = Object.entries(tableCounts)
-			.filter((entry) => Number(entry[1] || 0) > 0)
-			.map((entry) => `${escapeHtml(entry[0])} (${escapeHtml(entry[1])})`)
-			.join("<br>");
-		const fileSummary = sampleFiles.map((path) => escapeHtml(path)).join("<br>");
-
 		previewBadge.textContent = mode;
 
 		if (filesCount === 0 && dbRows === 0) {
-			previewMessage.textContent = "No changes detected since the last successful Sync.";
+			previewMessage.textContent = "No pending changes detected since the last successful Sync.";
 		} else {
-			previewMessage.textContent = `${filesCount} files and ${dbRows} DB rows will sync to the destination site.`;
+			previewMessage.textContent = config.strings.previewSelectionHelp || "Review the pending file sections and database tables, then uncheck anything you do not want to send.";
 		}
 
-		renderMeta(previewMeta, [
-			{ label: config.strings.lastSync || "Last successful Sync", value: formatDateTime(preview.lastSyncTime || "") },
-			{ label: "Mode", value: mode },
-			{ label: config.strings.selectedScopes || "Selected scopes", value: selectedScopes.join(", ") || "None" },
-			{ label: config.strings.pendingChanges || "Pending changes", value: changedScopeLabels.join(", ") || "None" },
-			{ label: config.strings.pendingBaseline || "Still need baseline", value: pendingScopes.join(", ") || "None" },
-			{ label: config.strings.files || "Files", value: filesCount.toLocaleString() },
-			{ label: config.strings.dbRows || "DB rows", value: dbRows.toLocaleString() },
-			{ label: config.strings.tableUpdates || "Table updates", value: tableSummary || "None", html: true },
-			{ label: config.strings.sampleFiles || "Sample files", value: fileSummary || "None", html: true },
-		]);
 		renderPreviewTree(preview);
 	};
 
@@ -545,34 +555,35 @@
 		return "No Sync has completed yet.";
 	};
 
+	const buildStatusSummary = (status) => {
+		if (String(status?.status || "") === "error") {
+			return getStatusMessage(status);
+		}
+
+		const lastSync = formatDateTime(status?.lastSyncTime || "");
+		const destination = status?.destinationUrl || "";
+		const files = Number(status?.filesSynced || 0).toLocaleString();
+		const dbRows = Number(status?.dbRowsSynced || 0).toLocaleString();
+		const mode = String(status?.mode || "").toLowerCase() === "baseline"
+			? (config.strings.baseline || "Baseline")
+			: String(status?.mode || "") === ""
+				? (config.strings.delta || "Delta")
+				: (config.strings.delta || "Delta");
+		const duration = formatDuration(status?.durationSeconds || 0);
+
+		return `Last Sync: ${lastSync} | ${destination || "Not set"} | ${files} files | ${dbRows} DB rows | ${mode} | ${duration}`;
+	};
+
 	const renderStatus = (status) => {
 		statusBadge.textContent = getStatusBadge(status);
-		statusMessage.textContent = getStatusMessage(status);
-
-		renderMeta(statusMeta, [
-			{ label: config.strings.lastRun || "Last run", value: formatDateTime(status?.at || "") },
-			{ label: config.strings.lastSync || "Last successful Sync", value: formatDateTime(status?.lastSyncTime || "") },
-			{ label: config.strings.destination || "Destination", value: status?.destinationUrl || "" },
-			{ label: config.strings.selectedScopes || "Selected scopes", value: Array.isArray(status?.selectedScopeLabels) ? status.selectedScopeLabels.join(", ") : "" },
-			{ label: config.strings.files || "Files", value: Number(status?.filesSynced || 0).toLocaleString() },
-			{ label: config.strings.dbRows || "DB rows", value: Number(status?.dbRowsSynced || 0).toLocaleString() },
-			{
-				label: "Mode",
-				value: String(status?.mode || "").toLowerCase() === "baseline"
-					? (config.strings.baseline || "Baseline")
-					: String(status?.mode || "") === ""
-						? ""
-						: (config.strings.delta || "Delta"),
-			},
-			{ label: config.strings.duration || "Duration", value: formatDuration(status?.durationSeconds || 0) },
-		]);
+		statusSummary.textContent = buildStatusSummary(status);
 	};
 
 	const clearPreview = () => {
 		latestPreview = null;
 		changedScopeIds = new Set();
 		renderPreview(null);
-		updateScopeCards();
+		updateScopeRows();
 		updateActionButtons();
 	};
 
@@ -635,7 +646,6 @@
 
 		previewBadge.textContent = config.strings.previewError || "Preview failed";
 		previewMessage.textContent = config.strings.selectAtLeastOneScope || "Select at least one file or database scope first.";
-		renderMeta(previewMeta, []);
 		return false;
 	};
 
@@ -644,9 +654,13 @@
 
 		try {
 			const data = await sendAjax("synchy_test_sync_connection");
+			connectionVerified = true;
 			renderConnectionResult(data.remoteSite || {}, false);
+			updateConnectionControls();
 		} catch (error) {
+			connectionVerified = false;
 			renderConnectionResult({ message: error.message }, true);
+			updateConnectionControls();
 		} finally {
 			setBusy(false);
 		}
@@ -669,7 +683,6 @@
 			clearPreview();
 			previewBadge.textContent = config.strings.previewError || "Preview failed";
 			previewMessage.textContent = error.message;
-			renderMeta(previewMeta, []);
 		} finally {
 			setBusy(false);
 		}
@@ -696,7 +709,7 @@
 
 		setBusy(true);
 		statusBadge.textContent = config.strings.syncingAction || "Syncing...";
-		statusMessage.textContent = "Saving the selected manual baseline state.";
+		statusSummary.textContent = "Saving the selected manual baseline state.";
 
 		try {
 			const data = await sendAjax("synchy_mark_sync_baseline_complete");
@@ -755,7 +768,7 @@
 		renderProgress(currentJob);
 		window.setTimeout(pollSyncJob, 100);
 		statusBadge.textContent = config.strings.syncingAction || "Syncing...";
-		statusMessage.textContent = "Sync is running. Keep this tab open until it finishes.";
+		statusSummary.textContent = "Sync is running. Keep this tab open until it finishes.";
 
 		try {
 			const data = await sendAjax("synchy_run_sync_changes");
@@ -787,8 +800,16 @@
 			return;
 		}
 
-		clearPreview();
+		if (
+			event.target === destinationUrlInput
+			|| event.target === usernameInput
+			|| event.target === passwordInput
+		) {
+			connectionVerified = false;
+		}
+
 		updateTargetNote();
+		updateConnectionControls();
 		updateActionButtons();
 	});
 	form.addEventListener("change", (event) => {
@@ -797,9 +818,17 @@
 			return;
 		}
 
-		clearPreview();
+		if (
+			event.target === destinationUrlInput
+			|| event.target === usernameInput
+			|| event.target === passwordInput
+			|| event.target === verifySslInput
+		) {
+			connectionVerified = false;
+		}
+
 		updateTargetNote();
-		updateScopeCards();
+		updateConnectionControls();
 		updateActionButtons();
 	});
 	testButton.addEventListener("click", runTestConnection);
@@ -808,7 +837,15 @@
 	manualBaselineButton.addEventListener("click", runManualBaseline);
 
 	updateTargetNote();
-	updateScopeCards();
-	updateActionButtons();
+	updateScopeRows();
 	renderProgress(currentJob);
+
+	if (currentJob && currentJob.status === "running") {
+		setBusy(true);
+		window.setTimeout(pollSyncJob, 100);
+		return;
+	}
+
+	updateConnectionControls();
+	updateActionButtons();
 })();

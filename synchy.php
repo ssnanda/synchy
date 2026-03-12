@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.31
+ * Version: 0.7.32
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.31';
+const SYNCHY_VERSION = '0.7.32';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -7084,13 +7084,26 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	$running_job = synchy_get_running_sync_job();
 	$sync_stage_items = synchy_get_sync_stage_items($running_job);
 	$password_hint = synchy_get_site_sync_password_hint($options);
-	$scope_groups = synchy_get_sync_scope_groups();
+	$scope_definitions = synchy_get_sync_scope_definitions();
 	$scope_status = synchy_get_sync_scope_status($options);
 	$last_sync_time = synchy_get_sync_last_time();
 	$status = synchy_get_sync_status();
 	$status_state = (string) ($status['status'] ?? '');
 	$status_badge = __('Awaiting baseline', 'synchy');
 	$status_message = __('No Sync has completed yet. The first Sync sends a baseline for the selected folders and database tables. Later Sync runs send deltas only.', 'synchy');
+	$status_destination = (string) ($status['destinationUrl'] ?? $options['destination_url'] ?? __('Not set', 'synchy'));
+	$status_mode = ucfirst((string) ($status['mode'] ?? ($last_sync_time > 0 ? 'delta' : 'baseline')));
+	$status_duration = !empty($status['durationSeconds']) ? synchy_format_sync_duration((float) $status['durationSeconds']) : __('N/A', 'synchy');
+	$status_summary = sprintf(
+		/* translators: 1: last sync timestamp, 2: destination URL, 3: files synced, 4: DB rows synced, 5: mode, 6: duration */
+		__('Last Sync: %1$s | %2$s | %3$s files | %4$s DB rows | %5$s | %6$s', 'synchy'),
+		$last_sync_time > 0 ? get_date_from_gmt(gmdate('Y-m-d H:i:s', $last_sync_time), get_option('date_format') . ' ' . get_option('time_format')) : __('Never', 'synchy'),
+		$status_destination,
+		number_format_i18n((int) ($status['filesSynced'] ?? 0)),
+		number_format_i18n((int) ($status['dbRowsSynced'] ?? 0)),
+		$status_mode,
+		$status_duration
+	);
 	$run_button_label = $scope_status['hasPendingBaseline'] ? __('Start Baseline', 'synchy') : __('Push Changes', 'synchy');
 
 	if ($status_state === 'success') {
@@ -7099,6 +7112,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	} elseif ($status_state === 'error') {
 		$status_badge = __('Error', 'synchy');
 		$status_message = (string) ($status['message'] ?? __('The most recent Sync failed.', 'synchy'));
+		$status_summary = $status_message;
 	} elseif ($status_state === 'idle') {
 		$status_badge = __('No changes', 'synchy');
 		$status_message = (string) ($status['message'] ?? __('No file or database changes were detected for Sync.', 'synchy'));
@@ -7136,32 +7150,41 @@ function synchy_render_incremental_site_sync_page(array $current): void
 						<h2><?php esc_html_e('Destination Connection', 'synchy'); ?></h2>
 						<div class="synchy-field">
 							<label class="synchy-label" for="synchy-sync-destination-url"><?php esc_html_e('WordPress URL', 'synchy'); ?></label>
-							<input
-								id="synchy-sync-destination-url"
-								type="url"
-								class="regular-text code"
-								name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[destination_url]"
-								value="<?php echo esc_attr((string) $options['destination_url']); ?>"
-								placeholder="https://live-site.com"
-								data-synchy-sync-url
-							/>
+							<div class="synchy-field-inline">
+								<input
+									id="synchy-sync-destination-url"
+									type="url"
+									class="regular-text code synchy-field-inline__input"
+									name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[destination_url]"
+									value="<?php echo esc_attr((string) $options['destination_url']); ?>"
+									placeholder="https://live-site.com"
+									data-synchy-sync-url
+								/>
+								<button type="submit" class="button" data-synchy-save-sync disabled><?php esc_html_e('Save Connection', 'synchy'); ?></button>
+							</div>
 						</div>
 
 						<div class="synchy-field">
 							<label class="synchy-label" for="synchy-sync-destination-username"><?php esc_html_e('Username', 'synchy'); ?></label>
-							<input
-								id="synchy-sync-destination-username"
-								type="text"
-								class="regular-text"
-								name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[destination_username]"
-								value="<?php echo esc_attr((string) $options['destination_username']); ?>"
-								autocomplete="username"
-								data-synchy-sync-username
-							/>
+							<div class="synchy-field-inline">
+								<input
+									id="synchy-sync-destination-username"
+									type="text"
+									class="regular-text synchy-field-inline__input"
+									name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[destination_username]"
+									value="<?php echo esc_attr((string) $options['destination_username']); ?>"
+									autocomplete="username"
+									data-synchy-sync-username
+								/>
+								<button type="button" class="button" data-synchy-test-sync><?php esc_html_e('Test Connection', 'synchy'); ?></button>
+							</div>
 						</div>
 
 						<div class="synchy-field">
-							<label class="synchy-label" for="synchy-sync-destination-password"><?php esc_html_e('Application Password', 'synchy'); ?></label>
+							<div class="synchy-field-label-row">
+								<label class="synchy-label" for="synchy-sync-destination-password"><?php esc_html_e('Application Password', 'synchy'); ?></label>
+								<span class="synchy-badge synchy-badge--muted" data-synchy-sync-inline-status><?php esc_html_e('Not checked', 'synchy'); ?></span>
+							</div>
 							<input
 								id="synchy-sync-destination-password"
 								type="password"
@@ -7171,6 +7194,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 								autocomplete="new-password"
 								placeholder="<?php esc_attr_e('Leave blank to keep the saved password', 'synchy'); ?>"
 								data-synchy-sync-password
+								data-has-saved-password="<?php echo !empty($options['destination_application_password']) ? '1' : '0'; ?>"
 							/>
 							<p class="synchy-field-note"><?php echo esc_html($password_hint); ?></p>
 						</div>
@@ -7182,26 +7206,22 @@ function synchy_render_incremental_site_sync_page(array $current): void
 									name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[verify_ssl]"
 									value="1"
 									<?php checked(!empty($options['verify_ssl'])); ?>
+									data-synchy-sync-verify-ssl
 								/>
 								<span><?php esc_html_e('Verify HTTPS certificates', 'synchy'); ?></span>
 							</label>
-							<p class="synchy-field-note">
-								<?php esc_html_e('Leave this on for real live sites. Turn it off only when you are testing against a local or self-signed destination.', 'synchy'); ?>
-							</p>
 						</div>
 
 						<div class="synchy-field">
 							<div class="synchy-stack synchy-stack--compact">
 								<div>
-									<label class="synchy-label"><?php esc_html_e('Baseline and Push Scope', 'synchy'); ?></label>
+									<label class="synchy-label"><?php esc_html_e('Baseline & Push Changes', 'synchy'); ?></label>
 									<p class="synchy-field-note">
 										<?php esc_html_e('Choose exactly what this Sync should control on the selected destination. Unchecked scopes are ignored.', 'synchy'); ?>
 									</p>
 								</div>
 								<div class="synchy-run-export">
 									<div class="synchy-input-row">
-										<button type="submit" class="button" data-synchy-save-sync><?php esc_html_e('Save Connection', 'synchy'); ?></button>
-										<button type="button" class="button" data-synchy-test-sync><?php esc_html_e('Test Connection', 'synchy'); ?></button>
 										<button type="button" class="button" data-synchy-preview-sync><?php esc_html_e('Preview Changes', 'synchy'); ?></button>
 										<button type="button" class="button button-primary button-large" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
 										<button
@@ -7223,38 +7243,34 @@ function synchy_render_incremental_site_sync_page(array $current): void
 										?>
 									</p>
 								</div>
-								<?php foreach ($scope_groups as $group) : ?>
-									<div class="synchy-scope-group">
-										<p class="synchy-stage-status__label"><?php echo esc_html((string) $group['label']); ?></p>
-										<div class="synchy-filter-list synchy-filter-list--stacked">
-											<?php foreach ($group['scopes'] as $scope_id => $scope) : ?>
-												<label class="synchy-scope-card">
-													<input
-														type="checkbox"
-														name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[<?php echo esc_attr((string) $scope['option_key']); ?>]"
-														value="1"
-														<?php checked(!empty($options[(string) $scope['option_key']])); ?>
-														data-synchy-sync-scope
-														data-scope-id="<?php echo esc_attr((string) $scope_id); ?>"
-													/>
-													<span class="synchy-scope-card__body">
-														<strong><?php echo esc_html((string) $scope['label']); ?></strong>
-														<span><?php echo esc_html((string) $scope['description']); ?></span>
-														<em class="synchy-scope-card__status">
-															<?php
-															echo esc_html(
-																in_array((string) $scope_id, $scope_status['pendingBaselineScopeIds'], true)
-																	? __('Needs baseline', 'synchy')
-																	: __('Ready for preview', 'synchy')
-															);
-															?>
-														</em>
-													</span>
-												</label>
-											<?php endforeach; ?>
+								<div class="synchy-sync-scope-table">
+									<?php foreach ($scope_definitions as $scope_id => $scope) : ?>
+										<input
+											type="hidden"
+											name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[<?php echo esc_attr((string) $scope['option_key']); ?>]"
+											value="<?php echo !empty($options[(string) $scope['option_key']]) ? '1' : '0'; ?>"
+											data-synchy-sync-scope
+											data-scope-id="<?php echo esc_attr((string) $scope_id); ?>"
+										/>
+										<div class="synchy-sync-scope-table__row" data-synchy-sync-scope-row data-scope-id="<?php echo esc_attr((string) $scope_id); ?>">
+											<div class="synchy-sync-scope-table__name">
+												<strong><?php echo esc_html((string) $scope['label']); ?></strong>
+												<span><?php echo esc_html((string) $scope['description']); ?></span>
+											</div>
+											<div class="synchy-sync-scope-table__status">
+												<span class="synchy-badge synchy-badge--muted" data-synchy-sync-scope-status>
+													<?php
+													echo esc_html(
+														in_array((string) $scope_id, $scope_status['pendingBaselineScopeIds'], true)
+															? __('Needs baseline', 'synchy')
+															: __('Ready for preview', 'synchy')
+													);
+													?>
+												</span>
+											</div>
 										</div>
-									</div>
-								<?php endforeach; ?>
+									<?php endforeach; ?>
+								</div>
 							</div>
 						</div>
 
@@ -7274,34 +7290,21 @@ function synchy_render_incremental_site_sync_page(array $current): void
 						<div class="synchy-panel synchy-panel--muted" data-synchy-sync-status-panel>
 							<div class="synchy-stack synchy-stack--compact">
 								<div class="synchy-stack__split">
-									<h2><?php esc_html_e('Last Sync Status', 'synchy'); ?></h2>
+									<h2><?php esc_html_e('Status', 'synchy'); ?></h2>
 									<span class="synchy-badge" data-synchy-sync-status-badge><?php echo esc_html($status_badge); ?></span>
 								</div>
-								<p data-synchy-sync-status-message><?php echo esc_html($status_message); ?></p>
-								<div class="synchy-export-meta" data-synchy-sync-status-meta>
-									<div>
-										<span class="synchy-export-meta__label"><?php esc_html_e('Last successful Sync', 'synchy'); ?></span>
-										<strong><?php echo esc_html($last_sync_time > 0 ? get_date_from_gmt(gmdate('Y-m-d H:i:s', $last_sync_time), get_option('date_format') . ' ' . get_option('time_format')) : __('Never', 'synchy')); ?></strong>
-									</div>
-									<div>
-										<span class="synchy-export-meta__label"><?php esc_html_e('Destination', 'synchy'); ?></span>
-										<strong><?php echo esc_html((string) ($status['destinationUrl'] ?? $options['destination_url'] ?? __('Not set', 'synchy'))); ?></strong>
-									</div>
-									<div>
-										<span class="synchy-export-meta__label"><?php esc_html_e('Files synced', 'synchy'); ?></span>
-										<strong><?php echo esc_html(number_format_i18n((int) ($status['filesSynced'] ?? 0))); ?></strong>
-									</div>
-									<div>
-										<span class="synchy-export-meta__label"><?php esc_html_e('DB rows synced', 'synchy'); ?></span>
-										<strong><?php echo esc_html(number_format_i18n((int) ($status['dbRowsSynced'] ?? 0))); ?></strong>
-									</div>
-									<div>
-										<span class="synchy-export-meta__label"><?php esc_html_e('Mode', 'synchy'); ?></span>
-										<strong><?php echo esc_html(ucfirst((string) ($status['mode'] ?? ($last_sync_time > 0 ? 'delta' : 'baseline')))); ?></strong>
-									</div>
-									<div>
-										<span class="synchy-export-meta__label"><?php esc_html_e('Duration', 'synchy'); ?></span>
-										<strong><?php echo esc_html(!empty($status['durationSeconds']) ? synchy_format_sync_duration((float) $status['durationSeconds']) : __('N/A', 'synchy')); ?></strong>
+								<p class="synchy-status-line" data-synchy-sync-status-summary><?php echo esc_html($status_summary); ?></p>
+								<div class="synchy-stage-status synchy-stage-status--compact">
+									<p class="synchy-stage-status__label"><?php esc_html_e('Sync Stage Status', 'synchy'); ?></p>
+									<div class="synchy-export-stages synchy-export-stages--inline" data-synchy-sync-stages>
+										<?php foreach ($sync_stage_items as $stage) : ?>
+											<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
+												<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
+												<div class="synchy-export-stage__content">
+													<strong><?php echo esc_html((string) $stage['label']); ?></strong>
+												</div>
+											</div>
+										<?php endforeach; ?>
 									</div>
 								</div>
 							</div>
@@ -7314,110 +7317,13 @@ function synchy_render_incremental_site_sync_page(array $current): void
 									<span class="synchy-badge" data-synchy-sync-preview-badge><?php echo esc_html($last_sync_time > 0 ? __('Delta', 'synchy') : __('Baseline', 'synchy')); ?></span>
 								</div>
 								<p class="synchy-field-note" data-synchy-sync-preview-message><?php esc_html_e('Run Preview Changes to see how many files and database rows Synchy will sync before anything is sent.', 'synchy'); ?></p>
-								<div class="synchy-export-meta" data-synchy-sync-preview-meta></div>
-							</div>
-						</div>
-
-						<div class="synchy-panel synchy-site-sync-result" data-synchy-sync-preview-panel>
-							<div class="synchy-stack synchy-stack--compact">
-								<div class="synchy-stack__split">
-									<h2><?php esc_html_e('Preview', 'synchy'); ?></h2>
-									<span class="synchy-badge"><?php echo esc_html($running_job !== [] ? __('Sync running', 'synchy') : __('Ready', 'synchy')); ?></span>
-								</div>
-
-								<div class="synchy-progress<?php echo $running_job === [] ? ' is-hidden' : ''; ?>" data-synchy-sync-progress>
-									<div class="synchy-progress__top">
-										<strong data-synchy-sync-progress-phase><?php echo esc_html(synchy_sync_phase_label((string) ($running_job['phase'] ?? ''))); ?></strong>
-										<span data-synchy-sync-progress-percent><?php echo esc_html((string) (int) ($running_job['progress'] ?? 0)); ?>%</span>
-									</div>
-									<div class="synchy-progress__bar">
-										<span data-synchy-sync-progress-bar style="width: <?php echo esc_attr((string) (int) ($running_job['progress'] ?? 0)); ?>%;"></span>
-									</div>
-									<p class="synchy-progress__message" data-synchy-sync-progress-message><?php echo esc_html((string) ($running_job['message'] ?? '')); ?></p>
-									<p class="synchy-progress__detail" data-synchy-sync-progress-detail>
-										<?php
-										if ($running_job !== []) {
-											printf(
-												/* translators: 1: file count, 2: db row count */
-												esc_html__('Selected changes: %1$s files, %2$s DB rows', 'synchy'),
-												esc_html(number_format_i18n((int) ($running_job['files_count'] ?? 0))),
-												esc_html(number_format_i18n((int) ($running_job['db_rows'] ?? 0)))
-											);
-										}
-										?>
-									</p>
-								</div>
-
-								<div class="synchy-stage-status">
-									<p class="synchy-stage-status__label"><?php esc_html_e('Sync Stage Status', 'synchy'); ?></p>
-									<div class="synchy-export-stages" data-synchy-sync-stages>
-										<?php foreach ($sync_stage_items as $stage) : ?>
-											<div class="synchy-export-stage is-<?php echo esc_attr((string) $stage['state']); ?>">
-												<span class="synchy-export-stage__indicator" aria-hidden="true"></span>
-												<div class="synchy-export-stage__content">
-													<strong><?php echo esc_html((string) $stage['label']); ?></strong>
-													<span><?php echo esc_html((string) $stage['description']); ?></span>
-												</div>
-											</div>
-										<?php endforeach; ?>
-									</div>
-								</div>
-
 								<div class="synchy-sync-tree is-hidden" data-synchy-sync-preview-tree></div>
 							</div>
 						</div>
+
 					</div>
 				</div>
 
-				<div class="synchy-grid synchy-grid--export">
-					<div class="synchy-panel">
-						<h2><?php esc_html_e('Current Scope', 'synchy'); ?></h2>
-						<ul class="synchy-checklist">
-							<li>
-								<?php
-								printf(
-									/* translators: %s: comma-separated scope labels */
-									esc_html__('Selected now: %s.', 'synchy'),
-									esc_html(implode(', ', $scope_status['selectedScopeLabels']))
-								);
-								?>
-							</li>
-							<li>
-								<?php
-								echo esc_html(
-									$scope_status['hasPendingBaseline']
-										? sprintf(
-											/* translators: %s: comma-separated scope labels */
-											__('Still need baseline: %s.', 'synchy'),
-											implode(', ', $scope_status['pendingBaselineLabels'])
-										)
-										: __('All selected scopes already have a baseline.', 'synchy')
-								);
-								?>
-							</li>
-							<li><?php esc_html_e('Users and passwords are never synced.', 'synchy'); ?></li>
-							<li><?php esc_html_e('File deletes are not applied on the live site yet. Sync only overwrites changed files and adds new ones.', 'synchy'); ?></li>
-						</ul>
-					</div>
-
-					<div class="synchy-panel synchy-panel--muted">
-						<h2><?php esc_html_e('What Sync Does', 'synchy'); ?></h2>
-						<ul class="synchy-checklist synchy-checklist--detail">
-							<li>
-								<strong><?php esc_html_e('First Sync builds a baseline', 'synchy'); ?></strong>
-								<span><?php esc_html_e('The first successful Sync sends all targeted plugins, the active theme, uploads, and the selected WordPress data tables.', 'synchy'); ?></span>
-							</li>
-							<li>
-								<strong><?php esc_html_e('Every later Sync sends deltas only', 'synchy'); ?></strong>
-								<span><?php esc_html_e('Synchy detects changed files plus changed posts, postmeta, options, terms, taxonomies, and relationships since the last successful Sync.', 'synchy'); ?></span>
-							</li>
-							<li>
-								<strong><?php esc_html_e('Live applies changes directly', 'synchy'); ?></strong>
-								<span><?php esc_html_e('The destination extracts the changed files into wp-content, safely rewrites URLs and paths in changed data, applies the SQL delta, then clears caches.', 'synchy'); ?></span>
-							</li>
-						</ul>
-					</div>
-				</div>
 			</form>
 		</div>
 	</div>
@@ -8384,6 +8290,10 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 				'strings' => [
 					'connectionReady' => __('Connection ready', 'synchy'),
 					'connectionError' => __('Connection failed', 'synchy'),
+					'connected' => __('Connected', 'synchy'),
+					'needsRetest' => __('Needs retest', 'synchy'),
+					'notChecked' => __('Not checked', 'synchy'),
+					'incomplete' => __('Incomplete', 'synchy'),
 					'previewReady' => __('Preview ready', 'synchy'),
 					'previewError' => __('Preview failed', 'synchy'),
 					'startBaseline' => __('Start Baseline', 'synchy'),
