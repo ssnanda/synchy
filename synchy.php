@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.6.4
+ * Version: 0.6.5
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.6.4';
+const SYNCHY_VERSION = '0.6.5';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -325,16 +325,16 @@ function synchy_get_pages(): array
 		],
 		[
 			'slug' => 'synchy-export',
-			'title' => __('Export Backups', 'synchy'),
-			'menu_title' => __('Export Backups', 'synchy'),
-			'headline' => __('Export Backups', 'synchy'),
+			'title' => __('Manual Export', 'synchy'),
+			'menu_title' => __('Manual Export', 'synchy'),
+			'headline' => __('Manual Export', 'synchy'),
 			'description' => __('Create on-demand site packages with an archive and installer workflow.', 'synchy'),
 		],
 		[
 			'slug' => 'synchy-import',
-			'title' => __('Import and Restore', 'synchy'),
-			'menu_title' => __('Import and Restore', 'synchy'),
-			'headline' => __('Import and Restore', 'synchy'),
+			'title' => __('Manual Import & Restore', 'synchy'),
+			'menu_title' => __('Manual Import & Restore', 'synchy'),
+			'headline' => __('Manual Import & Restore', 'synchy'),
 			'description' => __('Restore a site from a Synchy package and safely replace the current install.', 'synchy'),
 		],
 		[
@@ -345,11 +345,18 @@ function synchy_get_pages(): array
 			'description' => __('Automate recurring backups with retention and destination controls.', 'synchy'),
 		],
 		[
+			'slug' => 'synchy-push-live-site',
+			'title' => __('Push Backup to Live Site', 'synchy'),
+			'menu_title' => __('Push Backup to Live Site', 'synchy'),
+			'headline' => __('Push Backup to Live Site', 'synchy'),
+			'description' => __('Push a full Synchy backup package to another WordPress site and launch the manual restore there.', 'synchy'),
+		],
+		[
 			'slug' => 'synchy-site-sync',
 			'title' => __('Site Sync', 'synchy'),
 			'menu_title' => __('Site Sync', 'synchy'),
 			'headline' => __('Site Sync', 'synchy'),
-			'description' => __('Connect one WordPress site to another and sync from a chosen source.', 'synchy'),
+			'description' => __('Work toward incremental post-push changes without another full backup and restore cycle.', 'synchy'),
 		],
 		[
 			'slug' => 'synchy-settings',
@@ -700,10 +707,10 @@ function synchy_render_notice(): void
 		$page = isset($_GET['page']) ? sanitize_key(wp_unslash((string) $_GET['page'])) : '';
 		$settings_updated = isset($_GET['settings-updated']) ? sanitize_text_field(wp_unslash((string) $_GET['settings-updated'])) : '';
 
-		if ($page === 'synchy-site-sync' && $settings_updated === 'true') {
+		if ($page === 'synchy-push-live-site' && $settings_updated === 'true') {
 			$notice = [
 				'type' => 'success',
-				'message' => __('Site Sync settings saved.', 'synchy'),
+				'message' => __('Push destination settings saved.', 'synchy'),
 			];
 		} else {
 			return;
@@ -2875,7 +2882,7 @@ function synchy_render_export_page(array $current): void
 							<li><?php esc_html_e('The chosen export folder is excluded from the backup automatically if it lives inside this WordPress install.', 'synchy'); ?></li>
 							<li><?php esc_html_e('Duplicator backup folders remain excluded by default through wp-content/duplicator/.', 'synchy'); ?></li>
 							<li><?php esc_html_e('Runtime dependencies like Composer vendor folders should not be stripped by default.', 'synchy'); ?></li>
-							<li><?php esc_html_e('This package is not a Duplicator archive format. It will be restored through Synchy Import and Restore, not Duplicator Import.', 'synchy'); ?></li>
+							<li><?php esc_html_e('This package is not a Duplicator archive format. It will be restored through Synchy Manual Import & Restore, not Duplicator Import.', 'synchy'); ?></li>
 						</ul>
 					</div>
 				</div>
@@ -2916,7 +2923,7 @@ function synchy_render_site_sync_page(array $current): void
 		<div class="synchy-shell">
 			<div class="synchy-hero">
 				<div>
-					<p class="synchy-eyebrow"><?php esc_html_e('Push Workflow', 'synchy'); ?></p>
+					<p class="synchy-eyebrow"><?php esc_html_e('Manual Push', 'synchy'); ?></p>
 					<h1><?php echo esc_html($current['headline']); ?></h1>
 					<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
 				</div>
@@ -2939,7 +2946,7 @@ function synchy_render_site_sync_page(array $current): void
 							</li>
 							<li>
 								<strong><?php esc_html_e('Builds a fresh full-site package locally', 'synchy'); ?></strong>
-								<span><?php esc_html_e('The same export engine powers Site Sync so you always push a complete package generated from the local site.', 'synchy'); ?></span>
+								<span><?php esc_html_e('The same export engine powers this live push so you always send a complete package generated from the local site.', 'synchy'); ?></span>
 							</li>
 							<li>
 								<strong><?php esc_html_e('Uploads the package to the destination Synchy receiver', 'synchy'); ?></strong>
@@ -3035,7 +3042,7 @@ function synchy_render_site_sync_page(array $current): void
 							</p>
 							<p class="synchy-progress__detail" data-synchy-site-sync-timing></p>
 							<p class="synchy-field-note" data-synchy-site-sync-warning>
-								<?php esc_html_e('Keep this tab open while Site Sync is pushing. Refreshing or leaving the page interrupts the upload.', 'synchy'); ?>
+								<?php esc_html_e('Keep this tab open while the live push is running. Refreshing or leaving the page interrupts the upload.', 'synchy'); ?>
 							</p>
 						</div>
 
@@ -3043,7 +3050,7 @@ function synchy_render_site_sync_page(array $current): void
 							<div class="synchy-input-row">
 								<button type="submit" class="button" data-synchy-save-site-sync><?php esc_html_e('Save Connection', 'synchy'); ?></button>
 								<button type="button" class="button" data-synchy-test-site-sync><?php esc_html_e('Test Connection', 'synchy'); ?></button>
-								<button type="button" class="button button-primary button-large" data-synchy-run-site-sync><?php esc_html_e('Push Package to Destination', 'synchy'); ?></button>
+								<button type="button" class="button button-primary button-large" data-synchy-run-site-sync><?php esc_html_e('Push Backup to Live Site', 'synchy'); ?></button>
 							</div>
 						</div>
 					</div>
@@ -3074,7 +3081,7 @@ function synchy_render_site_sync_page(array $current): void
 					<div class="synchy-panel synchy-panel--muted">
 						<h2><?php esc_html_e('Current Limits', 'synchy'); ?></h2>
 						<ul class="synchy-checklist">
-							<li><?php esc_html_e('This Site Sync build authenticates, packages, uploads, and deploys a standalone installer to the destination root when that root is writable.', 'synchy'); ?></li>
+							<li><?php esc_html_e('This live-push build authenticates, packages, uploads, and deploys a standalone installer to the destination root when that root is writable.', 'synchy'); ?></li>
 							<li><?php esc_html_e('The actual overwrite is still a manual installer run on the destination. One-click remote apply is not connected yet.', 'synchy'); ?></li>
 							<li><?php esc_html_e('If the destination root is not writable, Synchy leaves the package in wp-content/uploads/synchy-site-sync and you must move the zip and installer.php manually.', 'synchy'); ?></li>
 							<li><?php esc_html_e('HTTPS chunk uploads depend on the destination host accepting request bodies at your configured chunk size.', 'synchy'); ?></li>
@@ -3083,6 +3090,75 @@ function synchy_render_site_sync_page(array $current): void
 				</div>
 
 			</form>
+		</div>
+	</div>
+	<?php
+}
+
+function synchy_render_incremental_site_sync_page(array $current): void
+{
+	?>
+	<div class="wrap synchy-admin">
+		<?php synchy_render_notice(); ?>
+		<div class="synchy-shell">
+			<div class="synchy-hero">
+				<div>
+					<p class="synchy-eyebrow"><?php esc_html_e('Incremental Workflow', 'synchy'); ?></p>
+					<h1><?php echo esc_html($current['headline']); ?></h1>
+					<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
+				</div>
+				<div class="synchy-status">
+					<span class="synchy-status__dot" aria-hidden="true"></span>
+					<?php esc_html_e('Planning', 'synchy'); ?>
+				</div>
+			</div>
+
+			<div class="synchy-grid synchy-grid--export">
+				<div class="synchy-panel">
+					<h2><?php esc_html_e('What This New Area Is For', 'synchy'); ?></h2>
+					<ul class="synchy-checklist synchy-checklist--detail">
+						<li>
+							<strong><?php esc_html_e('Start after an initial full push', 'synchy'); ?></strong>
+							<span><?php esc_html_e('Use Push Backup to Live Site first so the destination starts from a known full-package baseline.', 'synchy'); ?></span>
+						</li>
+						<li>
+							<strong><?php esc_html_e('Push only smaller follow-up changes', 'synchy'); ?></strong>
+							<span><?php esc_html_e('The goal here is to send changed files and controlled update instructions instead of another full backup and restore.', 'synchy'); ?></span>
+						</li>
+						<li>
+							<strong><?php esc_html_e('Avoid another manual restore cycle', 'synchy'); ?></strong>
+							<span><?php esc_html_e('This area is where Synchy will evolve toward direct placement of smaller changes after the first full deployment.', 'synchy'); ?></span>
+						</li>
+					</ul>
+				</div>
+
+				<div class="synchy-panel synchy-panel--muted">
+					<h2><?php esc_html_e('Problems To Solve', 'synchy'); ?></h2>
+					<ul class="synchy-checklist">
+						<li><?php esc_html_e('Detect added, changed, and deleted files reliably between source and destination.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Apply incremental file changes without breaking a live site mid-push.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Decide how database changes should be handled without another full database overwrite.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Keep rollback and audit visibility even when the push is only partial.', 'synchy'); ?></li>
+					</ul>
+				</div>
+			</div>
+
+			<div class="synchy-grid synchy-grid--export">
+				<div class="synchy-panel">
+					<h2><?php esc_html_e('Likely Direction', 'synchy'); ?></h2>
+					<ul class="synchy-checklist">
+						<li><?php esc_html_e('Create a source manifest and compare it against the destination manifest.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Upload only the files that changed since the last successful full push.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Track deletes explicitly so removed files do not linger on the live site.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Handle database changes as a separate strategy instead of silently replacing the whole database again.', 'synchy'); ?></li>
+					</ul>
+				</div>
+
+				<div class="synchy-panel synchy-panel--muted">
+					<h2><?php esc_html_e('Current Status', 'synchy'); ?></h2>
+					<p><?php esc_html_e('This page is the work area for the next Site Sync iteration. The active production-ready path today is still the full-package push under Push Backup to Live Site.', 'synchy'); ?></p>
+				</div>
+			</div>
 		</div>
 	</div>
 	<?php
@@ -3113,8 +3189,13 @@ function synchy_render_page(string $page_slug): void
 		return;
 	}
 
-	if ($page_slug === 'synchy-site-sync') {
+	if ($page_slug === 'synchy-push-live-site') {
 		synchy_render_site_sync_page($current);
+		return;
+	}
+
+	if ($page_slug === 'synchy-site-sync') {
+		synchy_render_incremental_site_sync_page($current);
 		return;
 	}
 
@@ -3122,7 +3203,8 @@ function synchy_render_page(string $page_slug): void
 		__('Export on-demand backups', 'synchy'),
 		__('Import and overwrite safely', 'synchy'),
 		__('Scheduled backup runs', 'synchy'),
-		__('One-click site sync', 'synchy'),
+		__('Push full backups live', 'synchy'),
+		__('Incremental site sync after the first push', 'synchy'),
 	];
 	?>
 	<div class="wrap synchy-admin">
@@ -3591,7 +3673,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 	}
 
 	if (!isset($_GET['page']) || sanitize_key((string) $_GET['page']) !== 'synchy-export') {
-		if (!isset($_GET['page']) || sanitize_key((string) $_GET['page']) !== 'synchy-site-sync') {
+		if (!isset($_GET['page']) || sanitize_key((string) $_GET['page']) !== 'synchy-push-live-site') {
 			return;
 		}
 
@@ -3623,7 +3705,8 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'completedIn' => __('Completed in', 'synchy'),
 					'connectionReady' => __('Connection ready', 'synchy'),
 					'connectionError' => __('Connection failed', 'synchy'),
-					'unknownError' => __('Synchy hit an unexpected Site Sync error.', 'synchy'),
+					'pushAction' => __('Push Backup to Live Site', 'synchy'),
+					'unknownError' => __('Synchy hit an unexpected live push error.', 'synchy'),
 				],
 			]
 		);

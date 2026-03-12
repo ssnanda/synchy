@@ -21,6 +21,7 @@
 	const resultBadge = document.querySelector("[data-synchy-site-sync-result-badge]");
 	const resultMessage = document.querySelector("[data-synchy-site-sync-result-message]");
 	const resultMeta = document.querySelector("[data-synchy-site-sync-result-meta]");
+	const pushActionLabel = config.strings?.pushAction || "Push Backup to Live Site";
 
 	if (!form || !testButton || !pushButton) {
 		return;
@@ -52,7 +53,7 @@
 
 		testButton.disabled = isBusy;
 		pushButton.disabled = isBusy;
-		pushButton.textContent = isBusy ? "Pushing..." : "Push Package to Destination";
+		pushButton.textContent = isBusy ? "Pushing..." : pushActionLabel;
 	};
 
 	const handleBeforeUnload = (event) => {
@@ -403,7 +404,7 @@
 			renderProgress({
 				phaseLabel: "Preparing",
 				progress: 1,
-				message: "Starting Site Sync push...",
+				message: "Starting live site push...",
 				bytesUploaded: 0,
 				bytesTotal: 0,
 				createdAt: new Date().toISOString(),
