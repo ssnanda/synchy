@@ -3,16 +3,16 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.23
+ * Version: 0.7.24
  * Update URI: https://github.com/ssnanda/synchy
- * Author: Codex
+ * Author: sandman
  */
 
 if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.23';
+const SYNCHY_VERSION = '0.7.24';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -643,11 +643,143 @@ function synchy_get_export_options(): array
 
 function synchy_get_site_sync_defaults(): array
 {
-	return [
+	$defaults = [
 		'destination_url' => '',
 		'destination_username' => '',
 		'destination_application_password' => '',
 		'verify_ssl' => 1,
+	];
+
+	foreach (synchy_get_sync_scope_definitions() as $scope) {
+		$defaults[(string) $scope['option_key']] = 1;
+	}
+
+	return $defaults;
+}
+
+function synchy_get_sync_scope_definitions(): array
+{
+	return [
+		'files_plugins' => [
+			'option_key' => 'sync_scope_files_plugins',
+			'type' => 'file',
+			'group' => 'files',
+			'label' => __('Plugins', 'synchy'),
+			'description' => __('Everything inside wp-content/plugins.', 'synchy'),
+		],
+		'files_themes' => [
+			'option_key' => 'sync_scope_files_themes',
+			'type' => 'file',
+			'group' => 'files',
+			'label' => __('Active Theme', 'synchy'),
+			'description' => __('The active theme plus its parent theme when one is active.', 'synchy'),
+		],
+		'files_uploads' => [
+			'option_key' => 'sync_scope_files_uploads',
+			'type' => 'file',
+			'group' => 'files',
+			'label' => __('Uploads', 'synchy'),
+			'description' => __('Everything inside wp-content/uploads.', 'synchy'),
+		],
+		'db_content' => [
+			'option_key' => 'sync_scope_db_content',
+			'type' => 'db',
+			'group' => 'database',
+			'label' => __('Posts & Post Meta', 'synchy'),
+			'description' => __('Posts, pages, CPTs, and related postmeta rows.', 'synchy'),
+		],
+		'db_options' => [
+			'option_key' => 'sync_scope_db_options',
+			'type' => 'db',
+			'group' => 'database',
+			'label' => __('Options', 'synchy'),
+			'description' => __('Selected WordPress options, excluding Synchy and transient data.', 'synchy'),
+		],
+		'db_taxonomies' => [
+			'option_key' => 'sync_scope_db_taxonomies',
+			'type' => 'db',
+			'group' => 'database',
+			'label' => __('Terms & Taxonomies', 'synchy'),
+			'description' => __('Terms, taxonomies, and term relationships.', 'synchy'),
+		],
+	];
+}
+
+function synchy_get_sync_scope_groups(): array
+{
+	$definitions = synchy_get_sync_scope_definitions();
+
+	return [
+		'files' => [
+			'label' => __('Files', 'synchy'),
+			'scopes' => array_filter(
+				$definitions,
+				static fn(array $scope): bool => (string) ($scope['group'] ?? '') === 'files'
+			),
+		],
+		'database' => [
+			'label' => __('Database', 'synchy'),
+			'scopes' => array_filter(
+				$definitions,
+				static fn(array $scope): bool => (string) ($scope['group'] ?? '') === 'database'
+			),
+		],
+	];
+}
+
+function synchy_get_selected_sync_scope_ids(array $options, string $group = ''): array
+{
+	$selected = [];
+
+	foreach (synchy_get_sync_scope_definitions() as $scope_id => $scope) {
+		if ($group !== '' && (string) ($scope['group'] ?? '') !== $group) {
+			continue;
+		}
+
+		if (!empty($options[(string) $scope['option_key']])) {
+			$selected[] = (string) $scope_id;
+		}
+	}
+
+	return $selected;
+}
+
+function synchy_get_sync_scope_labels(array $scope_ids): array
+{
+	$definitions = synchy_get_sync_scope_definitions();
+	$labels = [];
+
+	foreach ($scope_ids as $scope_id) {
+		if (!isset($definitions[$scope_id])) {
+			continue;
+		}
+
+		$labels[] = (string) $definitions[$scope_id]['label'];
+	}
+
+	return $labels;
+}
+
+function synchy_get_sync_scope_status(array $options, ?array $state = null): array
+{
+	$state = is_array($state) ? $state : synchy_get_sync_state();
+	$scope_sync_times = isset($state['scope_sync_times']) && is_array($state['scope_sync_times']) ? $state['scope_sync_times'] : [];
+	$selected_scope_ids = synchy_get_selected_sync_scope_ids($options);
+	$pending_baseline_scope_ids = [];
+
+	foreach ($selected_scope_ids as $scope_id) {
+		if (max(0, (int) ($scope_sync_times[$scope_id] ?? 0)) <= 0) {
+			$pending_baseline_scope_ids[] = $scope_id;
+		}
+	}
+
+	return [
+		'selectedScopeIds' => $selected_scope_ids,
+		'selectedScopeLabels' => synchy_get_sync_scope_labels($selected_scope_ids),
+		'pendingBaselineScopeIds' => $pending_baseline_scope_ids,
+		'pendingBaselineLabels' => synchy_get_sync_scope_labels($pending_baseline_scope_ids),
+		'hasPendingBaseline' => $pending_baseline_scope_ids !== [],
+		'hasSelection' => $selected_scope_ids !== [],
 	];
 }
 
@@ -693,6 +825,11 @@ function synchy_sanitize_site_sync_options($value): array
 
 	$sanitized['destination_application_password'] = $normalized_password;
 	$sanitized['verify_ssl'] = empty($value['verify_ssl']) ? 0 : 1;
+
+	foreach (synchy_get_sync_scope_definitions() as $scope) {
+		$option_key = (string) $scope['option_key'];
+		$sanitized[$option_key] = empty($value[$option_key]) ? 0 : 1;
+	}
 
 	return $sanitized;
 }
@@ -792,6 +929,7 @@ function synchy_get_sync_state(): array
 		return [
 			'last_sync_time' => synchy_get_sync_last_time(),
 			'db_fingerprints' => [],
+			'scope_sync_times' => [],
 		];
 	}
 
@@ -801,12 +939,16 @@ function synchy_get_sync_state(): array
 		return [
 			'last_sync_time' => synchy_get_sync_last_time(),
 			'db_fingerprints' => [],
+			'scope_sync_times' => [],
 		];
 	}
 
 	$decoded['last_sync_time'] = max(0, (int) ($decoded['last_sync_time'] ?? synchy_get_sync_last_time()));
 	$decoded['db_fingerprints'] = isset($decoded['db_fingerprints']) && is_array($decoded['db_fingerprints'])
 		? $decoded['db_fingerprints']
+		: [];
+	$decoded['scope_sync_times'] = isset($decoded['scope_sync_times']) && is_array($decoded['scope_sync_times'])
+		? array_map(static fn($value): int => max(0, (int) $value), $decoded['scope_sync_times'])
 		: [];
 
 	return $decoded;
@@ -878,35 +1020,46 @@ function synchy_get_sync_active_theme_slugs(): array
 	return array_values(array_filter($slugs));
 }
 
-function synchy_get_sync_file_targets(): array
+function synchy_get_sync_file_targets(array $selected_scope_ids = []): array
 {
 	$targets = [];
+	$selected_scope_ids = $selected_scope_ids === [] ? array_keys(synchy_get_sync_scope_definitions()) : $selected_scope_ids;
 	$plugins_dir = wp_normalize_path(WP_CONTENT_DIR . '/plugins');
 
-	if (is_dir($plugins_dir)) {
+	if (in_array('files_plugins', $selected_scope_ids, true) && is_dir($plugins_dir)) {
 		$targets[] = [
+			'scope_id' => 'files_plugins',
 			'path' => $plugins_dir,
 			'archive_prefix' => 'plugins',
 		];
 	}
 
-	foreach (synchy_get_sync_active_theme_slugs() as $slug) {
+	if (in_array('files_themes', $selected_scope_ids, true)) {
+		foreach (synchy_get_sync_active_theme_slugs() as $slug) {
 		$theme_dir = wp_normalize_path(WP_CONTENT_DIR . '/themes/' . $slug);
 
-		if (!is_dir($theme_dir)) {
-			continue;
-		}
+			if (!is_dir($theme_dir)) {
+				continue;
+			}
 
-		$targets[] = [
-			'path' => $theme_dir,
-			'archive_prefix' => 'themes/' . $slug,
-		];
+			$targets[] = [
+				'scope_id' => 'files_themes',
+				'path' => $theme_dir,
+				'archive_prefix' => 'themes/' . $slug,
+			];
+		}
 	}
 
 	$uploads = wp_upload_dir();
 
-	if (empty($uploads['error']) && !empty($uploads['basedir']) && is_dir((string) $uploads['basedir'])) {
+	if (
+		in_array('files_uploads', $selected_scope_ids, true)
+		&& empty($uploads['error'])
+		&& !empty($uploads['basedir'])
+		&& is_dir((string) $uploads['basedir'])
+	) {
 		$targets[] = [
+			'scope_id' => 'files_uploads',
 			'path' => wp_normalize_path((string) $uploads['basedir']),
 			'archive_prefix' => 'uploads',
 		];
@@ -957,13 +1110,21 @@ function synchy_is_sync_file_excluded(string $archive_path): bool
 	return false;
 }
 
-function synchy_collect_sync_file_delta(int $last_sync_time): array
+function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids): array
 {
-	$baseline = $last_sync_time <= 0;
 	$files = [];
 	$total_bytes = 0;
+	$baseline_scopes = [];
+	$scope_sync_times = isset($state['scope_sync_times']) && is_array($state['scope_sync_times']) ? $state['scope_sync_times'] : [];
 
-	foreach (synchy_get_sync_file_targets() as $target) {
+	foreach (synchy_get_sync_file_targets($selected_scope_ids) as $target) {
+		$scope_id = (string) ($target['scope_id'] ?? '');
+		$scope_last_sync_time = max(0, (int) ($scope_sync_times[$scope_id] ?? 0));
+
+		if ($scope_last_sync_time <= 0 && $scope_id !== '') {
+			$baseline_scopes[$scope_id] = true;
+		}
+
 		$base_path = wp_normalize_path((string) $target['path']);
 		$archive_prefix = trim((string) $target['archive_prefix'], '/');
 		$iterator = new RecursiveIteratorIterator(
@@ -986,7 +1147,7 @@ function synchy_collect_sync_file_delta(int $last_sync_time): array
 
 			$mtime = (int) $item->getMTime();
 
-			if (!$baseline && $mtime <= $last_sync_time) {
+			if ($scope_last_sync_time > 0 && $mtime <= $scope_last_sync_time) {
 				continue;
 			}
 
@@ -1009,10 +1170,12 @@ function synchy_collect_sync_file_delta(int $last_sync_time): array
 	);
 
 	return [
-		'mode' => $baseline ? 'baseline' : 'delta',
+		'mode' => $baseline_scopes !== [] ? 'baseline' : 'delta',
 		'files' => $files,
 		'count' => count($files),
 		'bytes' => $total_bytes,
+		'baseline_scopes' => array_keys($baseline_scopes),
+		'selected_scopes' => array_values($selected_scope_ids),
 	];
 }
 
@@ -1224,82 +1387,107 @@ function synchy_get_sync_option_rows(): array
 	);
 }
 
-function synchy_build_sync_database_delta(array $state): array
+function synchy_build_sync_database_delta(array $state, array $selected_scope_ids): array
 {
 	global $wpdb;
 
 	$specs = synchy_get_sync_table_specs();
-	$last_sync_time = max(0, (int) ($state['last_sync_time'] ?? synchy_get_sync_last_time()));
-	$baseline = $last_sync_time <= 0;
 	$previous_fingerprints = isset($state['db_fingerprints']) && is_array($state['db_fingerprints']) ? $state['db_fingerprints'] : [];
+	$scope_sync_times = isset($state['scope_sync_times']) && is_array($state['scope_sync_times']) ? $state['scope_sync_times'] : [];
 	$tables = [];
 	$current_fingerprints = [];
 	$total_rows = 0;
+	$baseline_scopes = [];
 
-	$post_ids = synchy_get_changed_post_ids_for_sync($last_sync_time);
-	$posts_rows = synchy_fetch_rows_by_ids($wpdb->posts, 'ID', $post_ids);
+	if (in_array('db_content', $selected_scope_ids, true)) {
+		$content_last_sync = max(0, (int) ($scope_sync_times['db_content'] ?? 0));
+		$content_baseline = $content_last_sync <= 0;
 
-	if ($posts_rows !== []) {
-		$tables[$wpdb->posts] = [
-			'key_columns' => $specs[$wpdb->posts]['key_columns'],
-			'rows' => $posts_rows,
-			'row_ids' => array_values(array_map(static fn(array $row): string => (string) ($row['ID'] ?? ''), $posts_rows)),
-			'update_columns' => [],
-		];
-		$total_rows += count($posts_rows);
-	}
-
-	$postmeta_rows = $post_ids === [] ? [] : synchy_fetch_rows_by_ids($wpdb->postmeta, 'post_id', $post_ids);
-
-	if ($postmeta_rows !== []) {
-		$tables[$wpdb->postmeta] = [
-			'key_columns' => $specs[$wpdb->postmeta]['key_columns'],
-			'rows' => $postmeta_rows,
-			'row_ids' => array_values(array_map(static fn(array $row): string => (string) ($row['meta_id'] ?? ''), $postmeta_rows)),
-			'update_columns' => [],
-		];
-		$total_rows += count($postmeta_rows);
-	}
-
-	$options_delta = synchy_build_sync_snapshot_delta(
-		synchy_get_sync_option_rows(),
-		isset($previous_fingerprints[$wpdb->options]) && is_array($previous_fingerprints[$wpdb->options]) ? $previous_fingerprints[$wpdb->options] : [],
-		$specs[$wpdb->options]['key_columns'],
-		$baseline
-	);
-	$current_fingerprints[$wpdb->options] = $options_delta['fingerprints'];
-
-	if ($options_delta['rows'] !== []) {
-		$tables[$wpdb->options] = [
-			'key_columns' => $specs[$wpdb->options]['key_columns'],
-			'rows' => $options_delta['rows'],
-			'row_ids' => $options_delta['row_ids'],
-			'update_columns' => $specs[$wpdb->options]['update_columns'],
-		];
-		$total_rows += count($options_delta['rows']);
-	}
-
-	foreach ([$wpdb->terms, $wpdb->term_taxonomy, $wpdb->term_relationships] as $table) {
-		$delta = synchy_build_sync_snapshot_delta(
-			synchy_fetch_all_rows_from_table($table),
-			isset($previous_fingerprints[$table]) && is_array($previous_fingerprints[$table]) ? $previous_fingerprints[$table] : [],
-			$specs[$table]['key_columns'],
-			$baseline
-		);
-
-		$current_fingerprints[$table] = $delta['fingerprints'];
-
-		if ($delta['rows'] === []) {
-			continue;
+		if ($content_baseline) {
+			$baseline_scopes[] = 'db_content';
 		}
 
-		$tables[$table] = [
-			'key_columns' => $specs[$table]['key_columns'],
-			'rows' => $delta['rows'],
-			'row_ids' => $delta['row_ids'],
-			'update_columns' => $specs[$table]['update_columns'] ?? [],
-		];
-		$total_rows += count($delta['rows']);
+		$post_ids = synchy_get_changed_post_ids_for_sync($content_last_sync);
+		$posts_rows = synchy_fetch_rows_by_ids($wpdb->posts, 'ID', $post_ids);
+
+		if ($posts_rows !== []) {
+			$tables[$wpdb->posts] = [
+				'key_columns' => $specs[$wpdb->posts]['key_columns'],
+				'rows' => $posts_rows,
+				'row_ids' => array_values(array_map(static fn(array $row): string => (string) ($row['ID'] ?? ''), $posts_rows)),
+				'update_columns' => [],
+			];
+			$total_rows += count($posts_rows);
+		}
+
+		$postmeta_rows = $post_ids === [] ? [] : synchy_fetch_rows_by_ids($wpdb->postmeta, 'post_id', $post_ids);
+
+		if ($postmeta_rows !== []) {
+			$tables[$wpdb->postmeta] = [
+				'key_columns' => $specs[$wpdb->postmeta]['key_columns'],
+				'rows' => $postmeta_rows,
+				'row_ids' => array_values(array_map(static fn(array $row): string => (string) ($row['meta_id'] ?? ''), $postmeta_rows)),
+				'update_columns' => [],
+			];
+			$total_rows += count($postmeta_rows);
+		}
+	}
+
+	if (in_array('db_options', $selected_scope_ids, true)) {
+		$options_baseline = max(0, (int) ($scope_sync_times['db_options'] ?? 0)) <= 0;
+
+		if ($options_baseline) {
+			$baseline_scopes[] = 'db_options';
+		}
+
+		$options_delta = synchy_build_sync_snapshot_delta(
+			synchy_get_sync_option_rows(),
+			isset($previous_fingerprints[$wpdb->options]) && is_array($previous_fingerprints[$wpdb->options]) ? $previous_fingerprints[$wpdb->options] : [],
+			$specs[$wpdb->options]['key_columns'],
+			$options_baseline
+		);
+		$current_fingerprints[$wpdb->options] = $options_delta['fingerprints'];
+
+		if ($options_delta['rows'] !== []) {
+			$tables[$wpdb->options] = [
+				'key_columns' => $specs[$wpdb->options]['key_columns'],
+				'rows' => $options_delta['rows'],
+				'row_ids' => $options_delta['row_ids'],
+				'update_columns' => $specs[$wpdb->options]['update_columns'],
+			];
+			$total_rows += count($options_delta['rows']);
+		}
+	}
+
+	if (in_array('db_taxonomies', $selected_scope_ids, true)) {
+		$taxonomy_baseline = max(0, (int) ($scope_sync_times['db_taxonomies'] ?? 0)) <= 0;
+
+		if ($taxonomy_baseline) {
+			$baseline_scopes[] = 'db_taxonomies';
+		}
+
+		foreach ([$wpdb->terms, $wpdb->term_taxonomy, $wpdb->term_relationships] as $table) {
+			$delta = synchy_build_sync_snapshot_delta(
+				synchy_fetch_all_rows_from_table($table),
+				isset($previous_fingerprints[$table]) && is_array($previous_fingerprints[$table]) ? $previous_fingerprints[$table] : [],
+				$specs[$table]['key_columns'],
+				$taxonomy_baseline
+			);
+
+			$current_fingerprints[$table] = $delta['fingerprints'];
+
+			if ($delta['rows'] === []) {
+				continue;
+			}
+
+			$tables[$table] = [
+				'key_columns' => $specs[$table]['key_columns'],
+				'rows' => $delta['rows'],
+				'row_ids' => $delta['row_ids'],
+				'update_columns' => $specs[$table]['update_columns'] ?? [],
+			];
+			$total_rows += count($delta['rows']);
+		}
 	}
 
 	$table_counts = [];
@@ -1309,11 +1497,13 @@ function synchy_build_sync_database_delta(array $state): array
 	}
 
 	return [
-		'mode' => $baseline ? 'baseline' : 'delta',
+		'mode' => $baseline_scopes !== [] ? 'baseline' : 'delta',
 		'tables' => $tables,
 		'table_counts' => $table_counts,
 		'total_rows' => $total_rows,
 		'current_fingerprints' => $current_fingerprints,
+		'baseline_scopes' => array_values(array_unique($baseline_scopes)),
+		'selected_scopes' => array_values($selected_scope_ids),
 	];
 }
 
@@ -1432,6 +1622,20 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 		'destination' => [
 			'url' => (string) ($options['destination_url'] ?? ''),
 		],
+		'scopes' => [
+			'selected' => array_values(array_unique(array_merge(
+				(array) ($file_delta['selected_scopes'] ?? []),
+				(array) ($db_delta['selected_scopes'] ?? [])
+			))),
+			'selectedLabels' => synchy_get_sync_scope_labels(array_values(array_unique(array_merge(
+				(array) ($file_delta['selected_scopes'] ?? []),
+				(array) ($db_delta['selected_scopes'] ?? [])
+			)))),
+			'baseline' => array_values(array_unique(array_merge(
+				(array) ($file_delta['baseline_scopes'] ?? []),
+				(array) ($db_delta['baseline_scopes'] ?? [])
+			))),
+		],
 		'files' => [
 			'count' => (int) ($file_delta['count'] ?? 0),
 			'bytes' => (int) ($file_delta['bytes'] ?? 0),
@@ -1448,31 +1652,55 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 function synchy_build_sync_package(array $options, bool $preview_only = false)
 {
 	$state = synchy_get_sync_state();
-	$last_sync_time = synchy_get_sync_last_time();
-	$state['last_sync_time'] = $last_sync_time;
-	$file_delta = synchy_collect_sync_file_delta($last_sync_time);
-	$db_delta = synchy_build_sync_database_delta($state);
+	$selected_scope_ids = synchy_get_selected_sync_scope_ids($options);
+
+	if ($selected_scope_ids === []) {
+		return new WP_Error('synchy_sync_no_scope_selected', __('Select at least one file or database scope before previewing or syncing.', 'synchy'));
+	}
+
+	$state['last_sync_time'] = synchy_get_sync_last_time();
+	$file_delta = synchy_collect_sync_file_delta($state, synchy_get_selected_sync_scope_ids($options, 'files'));
+	$db_delta = synchy_build_sync_database_delta($state, synchy_get_selected_sync_scope_ids($options, 'database'));
 	$sync_time = time();
 	$manifest = synchy_build_sync_manifest($file_delta, $db_delta, $sync_time, $options);
+	$baseline_scope_ids = array_values(array_unique(array_merge(
+		(array) ($file_delta['baseline_scopes'] ?? []),
+		(array) ($db_delta['baseline_scopes'] ?? [])
+	)));
+	$scope_sync_times = isset($state['scope_sync_times']) && is_array($state['scope_sync_times']) ? $state['scope_sync_times'] : [];
+
+	foreach ($selected_scope_ids as $scope_id) {
+		$scope_sync_times[$scope_id] = $sync_time;
+	}
+
+	$next_state = [
+		'last_sync_time' => $sync_time,
+		'db_fingerprints' => array_replace(
+			isset($state['db_fingerprints']) && is_array($state['db_fingerprints']) ? $state['db_fingerprints'] : [],
+			(array) ($db_delta['current_fingerprints'] ?? [])
+		),
+		'scope_sync_times' => $scope_sync_times,
+	];
 	$summary = [
-		'mode' => (string) ($manifest['mode'] ?? 'delta'),
+		'mode' => $baseline_scope_ids !== [] ? 'baseline' : 'delta',
 		'filesCount' => (int) ($manifest['files']['count'] ?? 0),
 		'filesBytes' => (int) ($manifest['files']['bytes'] ?? 0),
 		'filePaths' => array_slice((array) ($manifest['files']['paths'] ?? []), 0, 40),
 		'dbRows' => (int) ($manifest['database']['totalRows'] ?? 0),
 		'tableCounts' => (array) ($manifest['database']['tableCounts'] ?? []),
-		'lastSyncTime' => $last_sync_time,
+		'lastSyncTime' => synchy_get_sync_last_time(),
 		'syncedAt' => $sync_time,
+		'selectedScopes' => $selected_scope_ids,
+		'selectedScopeLabels' => synchy_get_sync_scope_labels($selected_scope_ids),
+		'pendingBaselineScopes' => $baseline_scope_ids,
+		'pendingBaselineLabels' => synchy_get_sync_scope_labels($baseline_scope_ids),
 	];
 
 	if ($preview_only) {
 		return [
 			'preview' => $summary,
 			'manifest' => $manifest,
-			'next_state' => [
-				'last_sync_time' => $sync_time,
-				'db_fingerprints' => (array) ($db_delta['current_fingerprints'] ?? []),
-			],
+			'next_state' => $next_state,
 		];
 	}
 
@@ -1481,10 +1709,7 @@ function synchy_build_sync_package(array $options, bool $preview_only = false)
 			'no_changes' => true,
 			'preview' => $summary,
 			'manifest' => $manifest,
-			'next_state' => [
-				'last_sync_time' => $sync_time,
-				'db_fingerprints' => (array) ($db_delta['current_fingerprints'] ?? []),
-			],
+			'next_state' => $next_state,
 		];
 	}
 
@@ -1545,10 +1770,7 @@ function synchy_build_sync_package(array $options, bool $preview_only = false)
 	return [
 		'preview' => $summary,
 		'manifest' => $manifest,
-		'next_state' => [
-			'last_sync_time' => $sync_time,
-			'db_fingerprints' => (array) ($db_delta['current_fingerprints'] ?? []),
-		],
+		'next_state' => $next_state,
 		'temp_dir' => $temp_dir,
 		'zip_path' => $zip_path,
 	];
@@ -4501,6 +4723,25 @@ function synchy_render_import_page(array $current): void
 				</div>
 			</div>
 
+			<div class="synchy-panel synchy-panel--danger synchy-panel--wide">
+				<div class="synchy-stack synchy-stack--compact">
+					<div>
+						<p class="synchy-panel__eyebrow synchy-panel__eyebrow--danger"><?php esc_html_e('Not Ready Yet', 'synchy'); ?></p>
+						<h2><?php esc_html_e('Import is reliable for installer placement, but large browser zip uploads are not finished.', 'synchy'); ?></h2>
+						<p>
+							<?php esc_html_e('installer.php placement works well. Large package zip uploads can still fail before WordPress sees the file when PHP, the host, or Cloudflare rejects the request.', 'synchy'); ?>
+						</p>
+					</div>
+					<ul class="synchy-checklist">
+						<li><?php esc_html_e('Working now: upload installer.php, stage it safely, and place it in the destination WordPress root.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Working now: show the exact root path, staging folder, and installer URL after placement.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Working now: smaller package zips can be staged and copied into the root when the browser upload succeeds.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Not ready yet: reliable large zip uploads for bigger sites when the package exceeds browser, proxy, or CDN limits.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Best current path for larger sites: place installer.php with Import, then use Upload to Live or manual file placement for the zip.', 'synchy'); ?></li>
+					</ul>
+				</div>
+			</div>
+
 			<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" enctype="multipart/form-data" class="synchy-form">
 				<?php wp_nonce_field('synchy_stage_import_package'); ?>
 				<input type="hidden" name="action" value="synchy_stage_import_package" />
@@ -6034,6 +6275,25 @@ function synchy_render_site_sync_page(array $current): void
 				</div>
 			</div>
 
+			<div class="synchy-panel synchy-panel--danger synchy-panel--wide">
+				<div class="synchy-stack synchy-stack--compact">
+					<div>
+						<p class="synchy-panel__eyebrow synchy-panel__eyebrow--danger"><?php esc_html_e('Not Ready Yet', 'synchy'); ?></p>
+						<h2><?php esc_html_e('Upload to Live is still a manual package-delivery workflow.', 'synchy'); ?></h2>
+						<p>
+							<?php esc_html_e('It is good for sending the full Synchy package and installer.php to the destination site. It is not yet a one-click live deployment or automatic remote restore.', 'synchy'); ?>
+						</p>
+					</div>
+					<ul class="synchy-checklist">
+						<li><?php esc_html_e('Working now: save the destination connection, verify authentication, and confirm the destination receiver is reachable.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Working now: build a fresh full-site package locally with the Synchy export engine.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Working now: upload the archive and installer.php to the destination site in chunks.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Working now: place installer.php and the package zip in the destination root when that root is writable by PHP.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Still manual: open installer.php on the destination site and run the overwrite/restore yourself.', 'synchy'); ?></li>
+					</ul>
+				</div>
+			</div>
+
 			<form method="post" action="options.php" class="synchy-form" data-synchy-site-sync-form>
 				<?php settings_fields('synchy_site_sync'); ?>
 
@@ -6211,6 +6471,66 @@ function synchy_render_site_sync_page(array $current): void
 				</div>
 
 			</form>
+		</div>
+	</div>
+	<?php
+}
+
+function synchy_render_schedule_page(array $current): void
+{
+	?>
+	<div class="wrap synchy-admin">
+		<?php synchy_render_notice(); ?>
+		<div class="synchy-shell">
+			<div class="synchy-hero">
+				<div>
+					<p class="synchy-eyebrow"><?php esc_html_e('Automation Workflow', 'synchy'); ?></p>
+					<h1><?php echo esc_html($current['headline']); ?></h1>
+					<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
+				</div>
+				<div class="synchy-status">
+					<span class="synchy-status__dot" aria-hidden="true"></span>
+					<?php esc_html_e('Not ready', 'synchy'); ?>
+				</div>
+			</div>
+
+			<div class="synchy-panel synchy-panel--danger synchy-panel--wide">
+				<div class="synchy-stack synchy-stack--compact">
+					<div>
+						<p class="synchy-panel__eyebrow synchy-panel__eyebrow--danger"><?php esc_html_e('Not Ready Yet', 'synchy'); ?></p>
+						<h2><?php esc_html_e('Scheduled backups are not connected yet.', 'synchy'); ?></h2>
+						<p>
+							<?php esc_html_e('This area does not create or run automated jobs yet. Use the manual workflows below until scheduling is built and validated.', 'synchy'); ?>
+						</p>
+					</div>
+					<ul class="synchy-checklist">
+						<li><?php esc_html_e('Working now: Export builds a full package on demand with archive history and downloads.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Working now: Import places installer.php and smaller packages on the destination for manual restore.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Working now: Upload to Live sends the full package to another WordPress site and stages the manual restore there.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Not ready yet: recurring schedules, retention automation, unattended remote jobs, and email/reporting around scheduled runs.', 'synchy'); ?></li>
+					</ul>
+				</div>
+			</div>
+
+			<div class="synchy-grid">
+				<div class="synchy-panel">
+					<h2><?php esc_html_e('Use These Instead', 'synchy'); ?></h2>
+					<ul class="synchy-checklist">
+						<li><?php esc_html_e('Use Export when you want a fresh manual backup package right now.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Use Import on the destination site when you want to place installer.php or a smaller package manually.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Use Upload to Live when you want Synchy to deliver the package and installer to another site for manual restore.', 'synchy'); ?></li>
+					</ul>
+				</div>
+
+				<div class="synchy-panel synchy-panel--muted">
+					<h2><?php esc_html_e('What Is Still Missing', 'synchy'); ?></h2>
+					<ul class="synchy-checklist">
+						<li><?php esc_html_e('Choosing schedules like hourly, daily, or weekly.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Queueing jobs reliably in WP-Cron or a server cron runner.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Automatic cleanup, retention, notifications, and failed-run recovery.', 'synchy'); ?></li>
+					</ul>
+				</div>
+			</div>
 		</div>
 	</div>
 	<?php
@@ -6614,6 +6934,11 @@ function synchy_render_page(string $page_slug): void
 		return;
 	}
 
+	if ($page_slug === 'synchy-scheduled-backups') {
+		synchy_render_schedule_page($current);
+		return;
+	}
+
 	if ($page_slug === 'synchy-site-sync') {
 		synchy_render_incremental_site_sync_page($current);
 		return;
@@ -6694,6 +7019,9 @@ add_action('admin_menu', function (): void {
 			}
 		);
 	}
+
+	// WordPress auto-adds a duplicate first submenu item that mirrors the top-level page.
+	remove_submenu_page($first['slug'], $first['slug']);
 });
 
 add_action('wp_dashboard_setup', function (): void {

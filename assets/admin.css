@@ -93,6 +93,33 @@
 	background: rgba(241, 246, 242, 0.92);
 }
 
+.synchy-panel--danger {
+	border-color: #efc7c7;
+	background: linear-gradient(180deg, rgba(255, 246, 246, 0.96) 0%, rgba(255, 239, 239, 0.96) 100%);
+}
+
+.synchy-panel--danger h2,
+.synchy-panel--danger p,
+.synchy-panel--danger li {
+	color: #6c1f1f;
+}
+
+.synchy-panel--danger .synchy-checklist {
+	color: #6c1f1f;
+}
+
+.synchy-panel__eyebrow {
+	margin: 0 0 8px;
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.synchy-panel__eyebrow--danger {
+	color: #c23333;
+}
+
 .synchy-panel h2 {
 	margin-top: 0;
 	margin-bottom: 12px;
