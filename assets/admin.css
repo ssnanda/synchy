@@ -277,6 +277,25 @@
 	gap: 10px;
 }
 
+.synchy-history-list {
+	display: grid;
+	gap: 14px;
+}
+
+.synchy-history-item {
+	padding: 18px;
+	border: 1px solid #d7e1da;
+	border-radius: 20px;
+	background: rgba(255, 255, 255, 0.92);
+}
+
+.synchy-history-item__title {
+	margin: 0;
+	color: #12323b;
+	font-size: 18px;
+	line-height: 1.4;
+}
+
 .synchy-progress {
 	margin-top: 18px;
 	padding: 16px;

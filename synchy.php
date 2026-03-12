@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.6
+ * Version: 0.7.7
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,10 +12,11 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.6';
+const SYNCHY_VERSION = '0.7.7';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
+const SYNCHY_EXPORT_HISTORY_OPTION = 'synchy_export_history';
 const SYNCHY_EXPORT_JOB_OPTION = 'synchy_export_job';
 const SYNCHY_SITE_SYNC_OPTIONS = 'synchy_site_sync_options';
 const SYNCHY_SITE_SYNC_JOB_OPTION = 'synchy_site_sync_job';
@@ -1562,6 +1563,179 @@ function synchy_get_last_export(): array
 	return is_array($value) ? $value : [];
 }
 
+function synchy_export_history_contains_package(array $history, string $package_id): bool
+{
+	foreach ($history as $entry) {
+		if (($entry['package_id'] ?? '') === $package_id) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+function synchy_is_export_artifact_readable($artifact): bool
+{
+	return is_array($artifact) && !empty($artifact['path']) && is_readable((string) $artifact['path']);
+}
+
+function synchy_is_export_record_available(array $record): bool
+{
+	$archive = $record['artifacts']['archive'] ?? null;
+
+	return synchy_is_export_artifact_readable($archive);
+}
+
+function synchy_update_export_history(array $history): array
+{
+	$history = array_values($history);
+	update_option(SYNCHY_EXPORT_HISTORY_OPTION, $history, false);
+
+	$latest = $history[0] ?? [];
+
+	if ($latest === []) {
+		delete_option(SYNCHY_LAST_EXPORT_OPTION);
+	} else {
+		update_option(SYNCHY_LAST_EXPORT_OPTION, $latest, false);
+	}
+
+	return $history;
+}
+
+function synchy_get_export_history(): array
+{
+	$stored = get_option(SYNCHY_EXPORT_HISTORY_OPTION, []);
+	$history = is_array($stored) ? $stored : [];
+	$changed = !is_array($stored);
+	$last_export = synchy_get_last_export();
+
+	if ($last_export !== [] && !synchy_export_history_contains_package($history, (string) ($last_export['package_id'] ?? ''))) {
+		array_unshift($history, $last_export);
+		$changed = true;
+	}
+
+	$normalized = [];
+	$seen = [];
+
+	foreach ($history as $entry) {
+		if (!is_array($entry)) {
+			$changed = true;
+			continue;
+		}
+
+		$package_id = trim((string) ($entry['package_id'] ?? ''));
+
+		if ($package_id === '' || isset($seen[$package_id])) {
+			$changed = true;
+			continue;
+		}
+
+		if (!synchy_is_export_record_available($entry)) {
+			$changed = true;
+			continue;
+		}
+
+		$seen[$package_id] = true;
+		$normalized[] = $entry;
+	}
+
+	$latest_package_id = (string) ($last_export['package_id'] ?? '');
+	$current_latest_package_id = (string) (($normalized[0] ?? [])['package_id'] ?? '');
+
+	if ($changed || $latest_package_id !== $current_latest_package_id) {
+		return synchy_update_export_history($normalized);
+	}
+
+	return $normalized;
+}
+
+function synchy_record_export_history(array $record): array
+{
+	$package_id = (string) ($record['package_id'] ?? '');
+
+	if ($package_id === '') {
+		return synchy_get_export_history();
+	}
+
+	$history = array_values(
+		array_filter(
+			synchy_get_export_history(),
+			static fn(array $entry): bool => (string) ($entry['package_id'] ?? '') !== $package_id
+		)
+	);
+
+	array_unshift($history, $record);
+
+	return synchy_update_export_history($history);
+}
+
+function synchy_find_export_history_item(string $package_id): array
+{
+	foreach (synchy_get_export_history() as $entry) {
+		if (($entry['package_id'] ?? '') === $package_id) {
+			return $entry;
+		}
+	}
+
+	return [];
+}
+
+function synchy_delete_export_history_item(string $package_id)
+{
+	$history = synchy_get_export_history();
+	$entry = [];
+	$remaining = [];
+
+	foreach ($history as $item) {
+		if ($entry === [] && ($item['package_id'] ?? '') === $package_id) {
+			$entry = $item;
+			continue;
+		}
+
+		$remaining[] = $item;
+	}
+
+	if ($entry === []) {
+		return new WP_Error('synchy_export_missing', __('That Synchy export is no longer available.', 'synchy'));
+	}
+
+	$deleted_files = 0;
+	$artifacts = isset($entry['artifacts']) && is_array($entry['artifacts']) ? $entry['artifacts'] : [];
+
+	foreach ($artifacts as $artifact) {
+		$path = wp_normalize_path((string) ($artifact['path'] ?? ''));
+
+		if ($path === '' || !file_exists($path)) {
+			continue;
+		}
+
+		if (!is_file($path)) {
+			continue;
+		}
+
+		if (@unlink($path) === false) {
+			return new WP_Error(
+				'synchy_export_delete_failed',
+				sprintf(
+					/* translators: %s: file path */
+					__('Synchy could not delete %s from the export history.', 'synchy'),
+					$path
+				)
+			);
+		}
+
+		$deleted_files++;
+	}
+
+	synchy_update_export_history($remaining);
+
+	return [
+		'package_id' => $package_id,
+		'package_name' => (string) ($entry['package_name'] ?? $package_id),
+		'deleted_files' => $deleted_files,
+	];
+}
+
 function synchy_update_export_job(array $job): array
 {
 	update_option(SYNCHY_EXPORT_JOB_OPTION, $job, false);
@@ -1956,7 +2130,7 @@ function synchy_finalize_export_job(array $job): array
 		],
 	];
 
-	update_option(SYNCHY_LAST_EXPORT_OPTION, $last_export, false);
+	synchy_record_export_history($last_export);
 	synchy_set_notice(
 		'success',
 		sprintf(
@@ -3941,6 +4115,7 @@ function synchy_handle_manual_import_upload()
 function synchy_render_import_page(array $current): void
 {
 	$result = synchy_get_import_result();
+	$export_history = synchy_get_export_history();
 	$stages = synchy_get_import_stage_items($result);
 	$root_path = synchy_get_site_root_path();
 	$root_writable = is_dir($root_path) && is_writable($root_path);
@@ -4122,6 +4297,8 @@ function synchy_render_import_page(array $current): void
 						</ul>
 					</div>
 				</div>
+
+				<?php synchy_render_export_history($export_history, 'synchy-import'); ?>
 			</form>
 		</div>
 	</div>
@@ -4689,59 +4866,107 @@ function synchy_get_download_url(string $package_id, string $artifact_type): str
 	);
 }
 
-function synchy_render_last_export(array $last_export): void
+function synchy_get_delete_export_url(string $package_id, string $page_slug): string
 {
-	if (empty($last_export['package_id'])) {
-		return;
-	}
+	return wp_nonce_url(
+		admin_url(
+			'admin-post.php?action=synchy_delete_export&package=' . rawurlencode($package_id) . '&page=' . rawurlencode($page_slug)
+		),
+		'synchy_delete_export_' . $package_id
+	);
+}
 
-	$artifacts = isset($last_export['artifacts']) && is_array($last_export['artifacts']) ? $last_export['artifacts'] : [];
-	$created = !empty($last_export['created_at']) ? strtotime((string) $last_export['created_at']) : false;
+function synchy_render_export_history(array $history, string $page_slug): void
+{
 	?>
 	<div class="synchy-panel synchy-panel--wide">
 		<div class="synchy-stack synchy-stack--compact">
 			<div class="synchy-stack__split">
 				<div>
-					<h2><?php esc_html_e('Latest Export', 'synchy'); ?></h2>
+					<h2><?php esc_html_e('Available Export History', 'synchy'); ?></h2>
 					<p class="synchy-field-note">
-						<?php esc_html_e('The newest package stays available here until you overwrite it or move it out of the selected destination folder.', 'synchy'); ?>
+						<?php esc_html_e('Synchy lists every retained export package whose archive is still available on disk. Delete removes the package files from this site.', 'synchy'); ?>
 					</p>
 				</div>
-				<span class="synchy-badge"><?php echo esc_html((string) ($last_export['package_name'] ?? $last_export['package_id'])); ?></span>
+				<span class="synchy-badge">
+					<?php
+					printf(
+						/* translators: %s: number of export packages */
+						esc_html(_n('%s package', '%s packages', count($history), 'synchy')),
+						esc_html(number_format_i18n(count($history)))
+					);
+					?>
+				</span>
 			</div>
 
-			<div class="synchy-export-meta">
-				<div>
-					<strong><?php esc_html_e('Created', 'synchy'); ?></strong>
-					<span>
+			<?php if ($history === []) : ?>
+				<p class="synchy-field-note"><?php esc_html_e('No Synchy exports are currently available on this site.', 'synchy'); ?></p>
+			<?php else : ?>
+				<div class="synchy-history-list">
+					<?php foreach ($history as $entry) : ?>
 						<?php
-						echo esc_html(
-							$created ? wp_date(get_option('date_format') . ' ' . get_option('time_format'), $created) : __('Unknown', 'synchy')
-						);
+						$package_id = (string) ($entry['package_id'] ?? '');
+						$package_name = (string) ($entry['package_name'] ?? $package_id);
+						$artifacts = isset($entry['artifacts']) && is_array($entry['artifacts']) ? $entry['artifacts'] : [];
+						$created = !empty($entry['created_at']) ? strtotime((string) $entry['created_at']) : false;
 						?>
-					</span>
-				</div>
-				<div>
-					<strong><?php esc_html_e('Save path', 'synchy'); ?></strong>
-					<span><?php echo esc_html((string) ($last_export['output_directory'] ?? '')); ?></span>
-				</div>
-				<div>
-					<strong><?php esc_html_e('Included files', 'synchy'); ?></strong>
-					<span><?php echo esc_html(number_format_i18n((int) ($last_export['file_count'] ?? 0))); ?></span>
-				</div>
-				<div>
-					<strong><?php esc_html_e('Archive size', 'synchy'); ?></strong>
-					<span><?php echo esc_html(size_format((int) ($last_export['archive_size'] ?? 0), 2)); ?></span>
-				</div>
-			</div>
+						<div class="synchy-history-item">
+							<div class="synchy-stack synchy-stack--compact">
+								<div class="synchy-stack__split">
+									<div>
+										<h3 class="synchy-history-item__title"><?php echo esc_html($package_name); ?></h3>
+										<p class="synchy-field-note"><?php echo esc_html($package_id); ?></p>
+									</div>
+									<span class="synchy-badge">
+										<?php
+										echo esc_html(
+											$created ? wp_date(get_option('date_format') . ' ' . get_option('time_format'), $created) : __('Unknown', 'synchy')
+										);
+										?>
+									</span>
+								</div>
 
-			<div class="synchy-downloads">
-				<?php foreach ($artifacts as $type => $artifact) : ?>
-					<a class="button" href="<?php echo esc_url(synchy_get_download_url((string) $last_export['package_id'], (string) $type)); ?>">
-						<?php echo esc_html((string) ($artifact['label'] ?? 'Download')); ?>
-					</a>
-				<?php endforeach; ?>
-			</div>
+								<div class="synchy-export-meta">
+									<div>
+										<strong><?php esc_html_e('Save path', 'synchy'); ?></strong>
+										<span class="synchy-text-break"><?php echo esc_html((string) ($entry['output_directory'] ?? '')); ?></span>
+									</div>
+									<div>
+										<strong><?php esc_html_e('Included files', 'synchy'); ?></strong>
+										<span><?php echo esc_html(number_format_i18n((int) ($entry['file_count'] ?? 0))); ?></span>
+									</div>
+									<div>
+										<strong><?php esc_html_e('Database tables', 'synchy'); ?></strong>
+										<span><?php echo esc_html(number_format_i18n((int) ($entry['table_count'] ?? 0))); ?></span>
+									</div>
+									<div>
+										<strong><?php esc_html_e('Archive size', 'synchy'); ?></strong>
+										<span><?php echo esc_html(size_format((int) ($entry['archive_size'] ?? 0), 2)); ?></span>
+									</div>
+								</div>
+
+								<div class="synchy-downloads">
+									<?php foreach ($artifacts as $type => $artifact) : ?>
+										<?php if (!synchy_is_export_artifact_readable($artifact)) : ?>
+											<?php continue; ?>
+										<?php endif; ?>
+										<a class="button" href="<?php echo esc_url(synchy_get_download_url($package_id, (string) $type)); ?>">
+											<?php echo esc_html((string) ($artifact['label'] ?? 'Download')); ?>
+										</a>
+									<?php endforeach; ?>
+									<a
+										class="button button-link-delete"
+										href="<?php echo esc_url(synchy_get_delete_export_url($package_id, $page_slug)); ?>"
+										onclick="return confirm('<?php echo esc_js(__('Delete this Synchy export and remove its files from disk?', 'synchy')); ?>');"
+									>
+										<?php esc_html_e('Delete Export', 'synchy'); ?>
+									</a>
+								</div>
+							</div>
+						</div>
+					<?php endforeach; ?>
+				</div>
+			<?php endif; ?>
 		</div>
 	</div>
 	<?php
@@ -4838,7 +5063,7 @@ function synchy_render_export_page(array $current): void
 	$options = synchy_get_export_options();
 	$groups = synchy_get_export_filter_groups();
 	$included = synchy_get_export_included_items();
-	$last_export = synchy_get_last_export();
+	$export_history = synchy_get_export_history();
 	$running_job = synchy_get_running_export_job();
 	$default_package_name = synchy_get_default_package_name();
 	$package_preview_base = (string) $options['package_name'] !== ''
@@ -4972,7 +5197,7 @@ function synchy_render_export_page(array $current): void
 						</div>
 					</div>
 
-				<?php synchy_render_last_export($last_export); ?>
+				<?php synchy_render_export_history($export_history, 'synchy-export'); ?>
 
 				<div class="synchy-panel synchy-panel--wide">
 					<h2><?php esc_html_e('Default Exclude Filters', 'synchy'); ?></h2>
@@ -5861,13 +6086,13 @@ add_action('admin_post_synchy_download_export', function (): void {
 
 	check_admin_referer('synchy_download_export_' . $package_id . '_' . $artifact);
 
-	$last_export = synchy_get_last_export();
+	$export = synchy_find_export_history_item($package_id);
 
-	if (($last_export['package_id'] ?? '') !== $package_id) {
+	if ($export === []) {
 		wp_die(esc_html__('That export is no longer available through Synchy.', 'synchy'));
 	}
 
-	$artifact_meta = $last_export['artifacts'][$artifact] ?? null;
+	$artifact_meta = $export['artifacts'][$artifact] ?? null;
 
 	if (!is_array($artifact_meta) || empty($artifact_meta['path']) || !is_readable((string) $artifact_meta['path'])) {
 		wp_die(esc_html__('The requested Synchy export file could not be found.', 'synchy'));
@@ -5887,6 +6112,46 @@ add_action('admin_post_synchy_download_export', function (): void {
 	header('Content-Disposition: attachment; filename="' . $filename . '"');
 
 	readfile($file_path);
+	exit;
+});
+
+add_action('admin_post_synchy_delete_export', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_die(esc_html__('You are not allowed to delete Synchy exports.', 'synchy'));
+	}
+
+	$package_id = isset($_GET['package']) ? sanitize_text_field(wp_unslash((string) $_GET['package'])) : '';
+	$page = isset($_GET['page']) ? sanitize_key(wp_unslash((string) $_GET['page'])) : 'synchy-export';
+	$allowed_pages = ['synchy-export', 'synchy-import'];
+
+	if (!in_array($page, $allowed_pages, true)) {
+		$page = 'synchy-export';
+	}
+
+	if ($package_id === '') {
+		synchy_set_notice('error', __('The Synchy export to delete was not specified.', 'synchy'));
+		wp_safe_redirect(admin_url('admin.php?page=' . $page));
+		exit;
+	}
+
+	check_admin_referer('synchy_delete_export_' . $package_id);
+
+	$deleted = synchy_delete_export_history_item($package_id);
+
+	if (is_wp_error($deleted)) {
+		synchy_set_notice('error', $deleted->get_error_message());
+	} else {
+		synchy_set_notice(
+			'success',
+			sprintf(
+				/* translators: %s: export package name */
+				__('Deleted Synchy export %s.', 'synchy'),
+				$deleted['package_name']
+			)
+		);
+	}
+
+	wp_safe_redirect(admin_url('admin.php?page=' . $page));
 	exit;
 });
 
