@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.6.7
+ * Version: 0.6.8
  * Update URI: https://github.com/ssnanda/synchy
  * Author: Codex
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.6.7';
+const SYNCHY_VERSION = '0.6.8';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -325,44 +325,44 @@ function synchy_get_pages(): array
 		],
 		[
 			'slug' => 'synchy-export',
-			'title' => __('Manual Export', 'synchy'),
-			'menu_title' => __('Manual Export', 'synchy'),
-			'headline' => __('Manual Export', 'synchy'),
+			'title' => __('Export', 'synchy'),
+			'menu_title' => __('Export', 'synchy'),
+			'headline' => __('Export', 'synchy'),
 			'description' => __('Create on-demand site packages with an archive and installer workflow.', 'synchy'),
 		],
 		[
 			'slug' => 'synchy-import',
-			'title' => __('Manual Import', 'synchy'),
-			'menu_title' => __('Manual Import', 'synchy'),
-			'headline' => __('Manual Import', 'synchy'),
+			'title' => __('Import', 'synchy'),
+			'menu_title' => __('Import', 'synchy'),
+			'headline' => __('Import', 'synchy'),
 			'description' => __('Restore a site from a Synchy package and safely replace the current install.', 'synchy'),
 		],
 		[
 			'slug' => 'synchy-scheduled-backups',
-			'title' => __('Scheduled Backups', 'synchy'),
-			'menu_title' => __('Scheduled Backups', 'synchy'),
-			'headline' => __('Scheduled Backups', 'synchy'),
+			'title' => __('Schedule', 'synchy'),
+			'menu_title' => __('Schedule', 'synchy'),
+			'headline' => __('Schedule', 'synchy'),
 			'description' => __('Automate recurring backups with retention and destination controls.', 'synchy'),
 		],
 		[
 			'slug' => 'synchy-push-live-site',
-			'title' => __('Push Backup to Live Site', 'synchy'),
-			'menu_title' => __('Push Backup to Live Site', 'synchy'),
-			'headline' => __('Push Backup to Live Site', 'synchy'),
-			'description' => __('Push a full Synchy backup package to another WordPress site and launch the manual restore there.', 'synchy'),
+			'title' => __('Upload to Live', 'synchy'),
+			'menu_title' => __('Upload to Live', 'synchy'),
+			'headline' => __('Upload to Live', 'synchy'),
+			'description' => __('Upload a full Synchy backup package to another WordPress site and launch the manual restore there.', 'synchy'),
 		],
 		[
 			'slug' => 'synchy-site-sync',
-			'title' => __('Site Sync', 'synchy'),
-			'menu_title' => __('Site Sync', 'synchy'),
-			'headline' => __('Site Sync', 'synchy'),
+			'title' => __('Sync', 'synchy'),
+			'menu_title' => __('Sync', 'synchy'),
+			'headline' => __('Sync', 'synchy'),
 			'description' => __('Work toward incremental post-push changes without another full backup and restore cycle.', 'synchy'),
 		],
 		[
 			'slug' => 'synchy-settings',
-			'title' => __('Settings & About', 'synchy'),
-			'menu_title' => __('Settings & About', 'synchy'),
-			'headline' => __('Settings & About', 'synchy'),
+			'title' => __('About', 'synchy'),
+			'menu_title' => __('About', 'synchy'),
+			'headline' => __('About', 'synchy'),
 			'description' => __('See Synchy configuration details, release/update wiring, and what each workflow area is responsible for.', 'synchy'),
 		],
 	];
@@ -710,7 +710,7 @@ function synchy_render_notice(): void
 		if ($page === 'synchy-push-live-site' && $settings_updated === 'true') {
 			$notice = [
 				'type' => 'success',
-				'message' => __('Push destination settings saved.', 'synchy'),
+				'message' => __('Upload destination settings saved.', 'synchy'),
 			];
 		} else {
 			return;
@@ -1887,22 +1887,22 @@ function synchy_get_site_sync_export_options(array $site_sync_options): array
 function synchy_validate_site_sync_options(array $options)
 {
 	if ((string) ($options['destination_url'] ?? '') === '') {
-		return new WP_Error('synchy_site_sync_missing_url', __('Enter the destination WordPress URL before testing Site Sync.', 'synchy'));
+		return new WP_Error('synchy_site_sync_missing_url', __('Enter the destination WordPress URL before testing Upload to Live.', 'synchy'));
 	}
 
 	if ((string) ($options['destination_username'] ?? '') === '') {
-		return new WP_Error('synchy_site_sync_missing_username', __('Enter the destination username for Site Sync.', 'synchy'));
+		return new WP_Error('synchy_site_sync_missing_username', __('Enter the destination username for Upload to Live.', 'synchy'));
 	}
 
 	if ((string) ($options['destination_application_password'] ?? '') === '') {
-		return new WP_Error('synchy_site_sync_missing_password', __('Enter the destination application password for Site Sync.', 'synchy'));
+		return new WP_Error('synchy_site_sync_missing_password', __('Enter the destination application password for Upload to Live.', 'synchy'));
 	}
 
 	$current_home = untrailingslashit(home_url('/'));
 	$destination_home = untrailingslashit((string) $options['destination_url']);
 
 	if ($current_home !== '' && $destination_home !== '' && $current_home === $destination_home) {
-		return new WP_Error('synchy_site_sync_same_site', __('The destination URL matches this site. Choose a different WordPress site for Site Sync.', 'synchy'));
+		return new WP_Error('synchy_site_sync_same_site', __('The destination URL matches this site. Choose a different WordPress site for Upload to Live.', 'synchy'));
 	}
 
 	return true;
@@ -2276,11 +2276,11 @@ function synchy_start_site_sync_job(array $raw_options)
 	$existing_job = synchy_get_running_site_sync_job();
 
 	if ($existing_job !== []) {
-		return new WP_Error('synchy_site_sync_running', __('A Synchy Site Sync push is already running. Wait for it to finish before starting another one.', 'synchy'));
+		return new WP_Error('synchy_site_sync_running', __('A Synchy Upload to Live run is already running. Wait for it to finish before starting another one.', 'synchy'));
 	}
 
 	if (synchy_get_running_export_job() !== []) {
-		return new WP_Error('synchy_site_sync_export_busy', __('Synchy is already building an export package. Wait for it to finish before starting Site Sync.', 'synchy'));
+		return new WP_Error('synchy_site_sync_export_busy', __('Synchy is already building an export package. Wait for it to finish before starting Upload to Live.', 'synchy'));
 	}
 
 	$options = synchy_sanitize_site_sync_options($raw_options);
@@ -2339,7 +2339,7 @@ function synchy_process_site_sync_job(array $job): array
 
 			$job['remote_site'] = $connection;
 			$job['phase'] = 'starting_export';
-			$job['message'] = __('Destination verified. Starting a fresh Synchy package for Site Sync.', 'synchy');
+			$job['message'] = __('Destination verified. Starting a fresh Synchy package for Upload to Live.', 'synchy');
 			$job['progress'] = 8;
 
 			return synchy_update_site_sync_job($job);
@@ -2354,7 +2354,7 @@ function synchy_process_site_sync_job(array $job): array
 
 			$job['export_job_id'] = (string) ($export_job['job_id'] ?? '');
 			$job['phase'] = 'exporting_package';
-			$job['message'] = __('Building the Site Sync package.', 'synchy');
+			$job['message'] = __('Building the Upload to Live package.', 'synchy');
 			$job['progress'] = 10;
 
 			return synchy_update_site_sync_job($job);
@@ -2363,7 +2363,7 @@ function synchy_process_site_sync_job(array $job): array
 			$export_job = synchy_get_export_job();
 
 			if ($export_job === [] || (string) ($export_job['job_id'] ?? '') !== (string) ($job['export_job_id'] ?? '')) {
-				return synchy_mark_site_sync_job_error($job, __('Synchy lost track of the export job for this Site Sync run.', 'synchy'));
+				return synchy_mark_site_sync_job_error($job, __('Synchy lost track of the export job for this Upload to Live run.', 'synchy'));
 			}
 
 			if (($export_job['status'] ?? '') === 'running') {
@@ -2371,11 +2371,11 @@ function synchy_process_site_sync_job(array $job): array
 			}
 
 			if (($export_job['status'] ?? '') === 'error') {
-				return synchy_mark_site_sync_job_error($job, (string) ($export_job['message'] ?? __('Synchy could not build the Site Sync package.', 'synchy')));
+				return synchy_mark_site_sync_job_error($job, (string) ($export_job['message'] ?? __('Synchy could not build the Upload to Live package.', 'synchy')));
 			}
 
 			if (($export_job['status'] ?? '') !== 'complete') {
-				$job['message'] = (string) ($export_job['message'] ?? __('Building the Site Sync package.', 'synchy'));
+				$job['message'] = (string) ($export_job['message'] ?? __('Building the Upload to Live package.', 'synchy'));
 				$job['progress'] = max(10, min(55, 10 + (int) floor(((int) ($export_job['progress'] ?? 0)) * 0.45)));
 
 				return synchy_update_site_sync_job($job);
@@ -2430,7 +2430,7 @@ function synchy_process_site_sync_job(array $job): array
 			);
 			$job['phase'] = 'uploading_archive';
 			$job['current_artifact'] = 'archive';
-			$job['message'] = __('Uploading the Site Sync archive to the destination.', 'synchy');
+			$job['message'] = __('Uploading the archive to the destination live site.', 'synchy');
 			$job['progress'] = 60;
 
 			return synchy_update_site_sync_job($job);
@@ -2442,7 +2442,7 @@ function synchy_process_site_sync_job(array $job): array
 			$upload_state = isset($artifact_uploads[$artifact]) && is_array($artifact_uploads[$artifact]) ? $artifact_uploads[$artifact] : [];
 
 			if ($artifact === '' || $upload_state === []) {
-				return synchy_mark_site_sync_job_error($job, __('Synchy could not find the active upload state for Site Sync.', 'synchy'));
+				return synchy_mark_site_sync_job_error($job, __('Synchy could not find the active upload state for Upload to Live.', 'synchy'));
 			}
 
 			$path = (string) ($upload_state['path'] ?? '');
@@ -2450,7 +2450,7 @@ function synchy_process_site_sync_job(array $job): array
 			$offset = (int) ($upload_state['offset'] ?? 0);
 
 			if ($path === '' || !is_readable($path)) {
-				return synchy_mark_site_sync_job_error($job, __('Synchy could not read the local Site Sync artifact before upload.', 'synchy'));
+				return synchy_mark_site_sync_job_error($job, __('Synchy could not read the local Upload to Live artifact before upload.', 'synchy'));
 			}
 
 			if ($offset >= $size) {
@@ -2473,7 +2473,7 @@ function synchy_process_site_sync_job(array $job): array
 			$chunk = file_get_contents($path, false, null, $offset, $chunk_size);
 
 			if ($chunk === false || $chunk === '') {
-				return synchy_mark_site_sync_job_error($job, __('Synchy could not read the next upload chunk for Site Sync.', 'synchy'));
+				return synchy_mark_site_sync_job_error($job, __('Synchy could not read the next upload chunk for Upload to Live.', 'synchy'));
 			}
 
 			$upload_response = synchy_site_sync_remote_request(
@@ -2560,7 +2560,7 @@ function synchy_process_site_sync_job(array $job): array
 			return synchy_update_site_sync_job($job);
 
 		default:
-			return synchy_mark_site_sync_job_error($job, __('Synchy encountered an unknown Site Sync phase.', 'synchy'));
+			return synchy_mark_site_sync_job_error($job, __('Synchy encountered an unknown Upload to Live phase.', 'synchy'));
 	}
 }
 
@@ -2882,7 +2882,7 @@ function synchy_render_export_page(array $current): void
 							<li><?php esc_html_e('The chosen export folder is excluded from the backup automatically if it lives inside this WordPress install.', 'synchy'); ?></li>
 							<li><?php esc_html_e('Duplicator backup folders remain excluded by default through wp-content/duplicator/.', 'synchy'); ?></li>
 							<li><?php esc_html_e('Runtime dependencies like Composer vendor folders should not be stripped by default.', 'synchy'); ?></li>
-							<li><?php esc_html_e('This package is not a Duplicator archive format. It will be restored through Synchy Manual Import, not Duplicator Import.', 'synchy'); ?></li>
+							<li><?php esc_html_e('This package is not a Duplicator archive format. It will be restored through Synchy Import, not Duplicator Import.', 'synchy'); ?></li>
 						</ul>
 					</div>
 				</div>
@@ -2923,7 +2923,7 @@ function synchy_render_site_sync_page(array $current): void
 		<div class="synchy-shell">
 			<div class="synchy-hero">
 				<div>
-					<p class="synchy-eyebrow"><?php esc_html_e('Manual Push', 'synchy'); ?></p>
+					<p class="synchy-eyebrow"><?php esc_html_e('Upload Workflow', 'synchy'); ?></p>
 					<h1><?php echo esc_html($current['headline']); ?></h1>
 					<p class="synchy-description"><?php echo esc_html($current['description']); ?></p>
 				</div>
@@ -3050,7 +3050,7 @@ function synchy_render_site_sync_page(array $current): void
 							<div class="synchy-input-row">
 								<button type="submit" class="button" data-synchy-save-site-sync><?php esc_html_e('Save Connection', 'synchy'); ?></button>
 								<button type="button" class="button" data-synchy-test-site-sync><?php esc_html_e('Test Connection', 'synchy'); ?></button>
-								<button type="button" class="button button-primary button-large" data-synchy-run-site-sync><?php esc_html_e('Push Backup to Live Site', 'synchy'); ?></button>
+								<button type="button" class="button button-primary button-large" data-synchy-run-site-sync><?php esc_html_e('Upload to Live', 'synchy'); ?></button>
 							</div>
 						</div>
 					</div>
@@ -3119,7 +3119,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 					<ul class="synchy-checklist synchy-checklist--detail">
 						<li>
 							<strong><?php esc_html_e('Start after an initial full push', 'synchy'); ?></strong>
-							<span><?php esc_html_e('Use Push Backup to Live Site first so the destination starts from a known full-package baseline.', 'synchy'); ?></span>
+							<span><?php esc_html_e('Use Upload to Live first so the destination starts from a known full-package baseline.', 'synchy'); ?></span>
 						</li>
 						<li>
 							<strong><?php esc_html_e('Push only smaller follow-up changes', 'synchy'); ?></strong>
@@ -3156,7 +3156,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 
 				<div class="synchy-panel synchy-panel--muted">
 					<h2><?php esc_html_e('Current Status', 'synchy'); ?></h2>
-					<p><?php esc_html_e('This page is the work area for the next Site Sync iteration. The active production-ready path today is still the full-package push under Push Backup to Live Site.', 'synchy'); ?></p>
+					<p><?php esc_html_e('This page is the work area for the next sync iteration. The active production-ready path today is still the full-package upload under Upload to Live.', 'synchy'); ?></p>
 				</div>
 			</div>
 		</div>
@@ -3236,10 +3236,10 @@ function synchy_render_settings_page(array $current): void
 					<h2><?php esc_html_e('About Synchy', 'synchy'); ?></h2>
 					<p><?php esc_html_e('Synchy is being built as a WordPress backup, restore, and deployment tool with a clear split between manual package workflows and future incremental sync workflows.', 'synchy'); ?></p>
 					<ul class="synchy-checklist">
-						<li><?php esc_html_e('Manual Export builds a portable archive plus installer package.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Manual Import is the destination-side overwrite path for full package restores.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Push Backup to Live Site sends a full package to another WordPress install and stages the manual restore there.', 'synchy'); ?></li>
-						<li><?php esc_html_e('Site Sync is the separate work area for incremental post-push changes without another full backup/restore cycle.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Export builds a portable archive plus installer package.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Import is the destination-side overwrite path for full package restores.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Upload to Live sends a full package to another WordPress install and stages the manual restore there.', 'synchy'); ?></li>
+						<li><?php esc_html_e('Sync is the separate work area for incremental post-push changes without another full backup/restore cycle.', 'synchy'); ?></li>
 					</ul>
 				</div>
 			</div>
@@ -3447,7 +3447,7 @@ add_action('wp_ajax_synchy_browse_export_directories', function (): void {
 
 add_action('wp_ajax_synchy_test_site_sync_connection', function (): void {
 	if (!current_user_can('manage_options')) {
-		wp_send_json_error(['message' => __('You are not allowed to test Synchy Site Sync connections.', 'synchy')], 403);
+		wp_send_json_error(['message' => __('You are not allowed to test Synchy Upload to Live connections.', 'synchy')], 403);
 	}
 
 	check_ajax_referer('synchy_site_sync_ajax', 'nonce');
@@ -3464,7 +3464,7 @@ add_action('wp_ajax_synchy_test_site_sync_connection', function (): void {
 
 add_action('wp_ajax_synchy_start_site_sync_push', function (): void {
 	if (!current_user_can('manage_options')) {
-		wp_send_json_error(['message' => __('You are not allowed to start Synchy Site Sync pushes.', 'synchy')], 403);
+		wp_send_json_error(['message' => __('You are not allowed to start Synchy Upload to Live runs.', 'synchy')], 403);
 	}
 
 	check_ajax_referer('synchy_site_sync_ajax', 'nonce');
@@ -3481,7 +3481,7 @@ add_action('wp_ajax_synchy_start_site_sync_push', function (): void {
 
 add_action('wp_ajax_synchy_continue_site_sync_push', function (): void {
 	if (!current_user_can('manage_options')) {
-		wp_send_json_error(['message' => __('You are not allowed to continue Synchy Site Sync pushes.', 'synchy')], 403);
+		wp_send_json_error(['message' => __('You are not allowed to continue Synchy Upload to Live runs.', 'synchy')], 403);
 	}
 
 	check_ajax_referer('synchy_site_sync_ajax', 'nonce');
@@ -3490,7 +3490,7 @@ add_action('wp_ajax_synchy_continue_site_sync_push', function (): void {
 	$job = synchy_get_site_sync_job();
 
 	if ($job === [] || $job_id === '' || $job_id !== (string) ($job['job_id'] ?? '')) {
-		wp_send_json_error(['message' => __('Synchy could not find the requested Site Sync job.', 'synchy')], 404);
+		wp_send_json_error(['message' => __('Synchy could not find the requested Upload to Live job.', 'synchy')], 404);
 	}
 
 	$job = synchy_process_site_sync_job($job);
@@ -3550,7 +3550,7 @@ add_action('rest_api_init', function (): void {
 
 		return new WP_Error(
 			'synchy_rest_forbidden',
-			__('You are not allowed to access Synchy Site Sync receiver endpoints.', 'synchy'),
+			__('You are not allowed to access Synchy Upload to Live receiver endpoints.', 'synchy'),
 			['status' => rest_authorization_required_code()]
 		);
 	};
@@ -3810,7 +3810,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'completedIn' => __('Completed in', 'synchy'),
 					'connectionReady' => __('Connection ready', 'synchy'),
 					'connectionError' => __('Connection failed', 'synchy'),
-					'pushAction' => __('Push Backup to Live Site', 'synchy'),
+					'pushAction' => __('Upload to Live', 'synchy'),
 					'unknownError' => __('Synchy hit an unexpected live push error.', 'synchy'),
 				],
 			]

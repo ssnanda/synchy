@@ -21,7 +21,7 @@
 	const resultBadge = document.querySelector("[data-synchy-site-sync-result-badge]");
 	const resultMessage = document.querySelector("[data-synchy-site-sync-result-message]");
 	const resultMeta = document.querySelector("[data-synchy-site-sync-result-meta]");
-	const pushActionLabel = config.strings?.pushAction || "Push Backup to Live Site";
+	const pushActionLabel = config.strings?.pushAction || "Upload to Live";
 
 	if (!form || !testButton || !pushButton) {
 		return;
@@ -404,7 +404,7 @@
 			renderProgress({
 				phaseLabel: "Preparing",
 				progress: 1,
-				message: "Starting live site push...",
+				message: "Starting live upload...",
 				bytesUploaded: 0,
 				bytesTotal: 0,
 				createdAt: new Date().toISOString(),
