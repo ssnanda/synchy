@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.34
+ * Version: 0.7.35
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.34';
+const SYNCHY_VERSION = '0.7.35';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -727,6 +727,77 @@ function synchy_get_sync_scope_groups(): array
 			),
 		],
 	];
+}
+
+function synchy_get_sync_top_level_entries(string $path, array $excluded = []): array
+{
+	if ($path === '' || !is_dir($path)) {
+		return [];
+	}
+
+	$items = scandir($path);
+
+	if (!is_array($items)) {
+		return [];
+	}
+
+	$excluded_lookup = array_fill_keys($excluded, true);
+	$entries = [];
+
+	foreach ($items as $item) {
+		if ($item === '.' || $item === '..') {
+			continue;
+		}
+
+		if (isset($excluded_lookup[$item])) {
+			continue;
+		}
+
+		$entries[] = (string) $item;
+	}
+
+	natcasesort($entries);
+
+	return array_values($entries);
+}
+
+function synchy_get_sync_scope_tracked_items(string $scope_id): array
+{
+	global $wpdb;
+
+	return match ($scope_id) {
+		'files_plugins' => array_map(
+			static fn(string $entry): string => 'wp-content/plugins/' . $entry,
+			synchy_get_sync_top_level_entries(WP_PLUGIN_DIR)
+		),
+		'files_themes' => array_map(
+			static fn(string $slug): string => 'wp-content/themes/' . $slug,
+			synchy_get_sync_active_theme_slugs()
+		) ?: [__('No active theme directories detected.', 'synchy')],
+		'files_uploads' => array_merge(
+			['wp-content/uploads/**'],
+			array_map(
+				static fn(string $entry): string => 'wp-content/uploads/' . $entry,
+				synchy_get_sync_top_level_entries(
+					wp_get_upload_dir()['basedir'] ?? '',
+					['synchy-backups', 'synchy-site-sync', 'synchy-sync', 'synchy-import']
+				)
+			)
+		),
+		'db_content' => [
+			$wpdb->posts,
+			$wpdb->postmeta,
+		],
+		'db_options' => [
+			$wpdb->options . ' (' . __('excluding transients and Synchy state', 'synchy') . ')',
+		],
+		'db_taxonomies' => [
+			$wpdb->terms,
+			$wpdb->term_taxonomy,
+			$wpdb->term_relationships,
+		],
+		default => [],
+	};
 }
 
 function synchy_get_selected_sync_scope_ids(array $options, string $group = ''): array
@@ -1480,10 +1551,11 @@ function synchy_is_sync_file_excluded(string $archive_path): bool
 		'.DS_Store',
 		'Thumbs.db',
 		'desktop.ini',
+		'uploads/ast-block-templates-json/index.html',
 	];
 
 	foreach ($excluded_exact as $exact) {
-		if (basename($archive_path) === $exact) {
+		if ($archive_path === $exact || basename($archive_path) === $exact) {
 			return true;
 		}
 	}
@@ -1593,6 +1665,9 @@ function synchy_should_sync_option_name(string $option_name): bool
 	$excluded = [
 		'cron',
 		'recently_edited',
+		'uagb_asset_version',
+		'fs_active_plugins',
+		'wcstripe_cache_live_account_data',
 		SYNCHY_EXPORT_OPTIONS,
 		SYNCHY_LAST_EXPORT_OPTION,
 		SYNCHY_EXPORT_JOB_OPTION,
@@ -1607,6 +1682,18 @@ function synchy_should_sync_option_name(string $option_name): bool
 
 	if (in_array($option_name, $excluded, true)) {
 		return false;
+	}
+
+	$excluded_prefixes = [
+		'action_scheduler_lock_',
+		'wcstripe_cache_',
+		'fs_',
+	];
+
+	foreach ($excluded_prefixes as $prefix) {
+		if (str_starts_with($option_name, $prefix)) {
+			return false;
+		}
 	}
 
 	if (str_starts_with($option_name, 'synchy_') || str_starts_with($option_name, 'syncy_')) {
@@ -2193,17 +2280,26 @@ function synchy_build_sync_preview_tree(array $file_delta, array $db_delta): arr
 				'label' => (string) ($scope_definitions[$scope_id]['label'] ?? $scope_id),
 				'count' => 0,
 				'bytes' => 0,
+				'files' => [],
 				'paths' => [],
 			];
 		}
 
 		$file_groups[$scope_id]['count']++;
 		$file_groups[$scope_id]['bytes'] += (int) ($file['size'] ?? 0);
+		$file_groups[$scope_id]['files'][] = [
+			'path' => (string) ($file['archive_path'] ?? ''),
+			'size' => (int) ($file['size'] ?? 0),
+		];
 		$file_groups[$scope_id]['paths'][] = (string) ($file['archive_path'] ?? '');
 	}
 
 	foreach ($file_groups as &$group) {
 		sort($group['paths']);
+		usort(
+			$group['files'],
+			static fn(array $left, array $right): int => strcmp((string) ($left['path'] ?? ''), (string) ($right['path'] ?? ''))
+		);
 	}
 	unset($group);
 
@@ -7362,6 +7458,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 								</div>
 								<div class="synchy-sync-scope-table">
 									<?php foreach ($scope_definitions as $scope_id => $scope) : ?>
+										<?php $tracked_items = synchy_get_sync_scope_tracked_items((string) $scope_id); ?>
 										<input
 											type="hidden"
 											name="<?php echo esc_attr(SYNCHY_SITE_SYNC_OPTIONS); ?>[<?php echo esc_attr((string) $scope['option_key']); ?>]"
@@ -7373,6 +7470,24 @@ function synchy_render_incremental_site_sync_page(array $current): void
 											<div class="synchy-sync-scope-table__name">
 												<strong><?php echo esc_html((string) $scope['label']); ?></strong>
 												<span><?php echo esc_html((string) $scope['description']); ?></span>
+												<?php if ($tracked_items !== []) : ?>
+													<details class="synchy-sync-scope-table__tracked">
+														<summary>
+															<?php
+															printf(
+																/* translators: %d: number of tracked items */
+																esc_html__('Tracked items (%d)', 'synchy'),
+																count($tracked_items)
+															);
+															?>
+														</summary>
+														<ul class="synchy-sync-scope-table__tracked-list">
+															<?php foreach ($tracked_items as $tracked_item) : ?>
+																<li class="synchy-text-break"><?php echo esc_html((string) $tracked_item); ?></li>
+															<?php endforeach; ?>
+														</ul>
+													</details>
+												<?php endif; ?>
 											</div>
 											<div class="synchy-sync-scope-table__status">
 												<span class="synchy-badge synchy-badge--muted" data-synchy-sync-scope-status>

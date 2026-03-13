@@ -408,6 +408,18 @@
 	font-weight: 600;
 }
 
+.synchy-sync-tree__details summary span {
+	color: #517075;
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.synchy-sync-tree__groups {
+	display: grid;
+	gap: 10px;
+	margin-top: 12px;
+}
+
 .synchy-sync-tree__list {
 	margin: 10px 0 0;
 	padding-left: 18px;
@@ -417,6 +429,19 @@
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: 12px;
 	word-break: break-word;
+}
+
+.synchy-sync-tree__list li {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.synchy-sync-tree__list li small {
+	flex: 0 0 auto;
+	color: #7a9396;
+	font-size: 11px;
 }
 
 .synchy-sync-tree__sample {
@@ -544,6 +569,27 @@
 	color: #517075;
 	font-size: 14px;
 	line-height: 1.45;
+}
+
+.synchy-sync-scope-table__tracked {
+	margin-top: 8px;
+}
+
+.synchy-sync-scope-table__tracked summary {
+	cursor: pointer;
+	color: #12323b;
+	font-size: 13px;
+	font-weight: 700;
+}
+
+.synchy-sync-scope-table__tracked-list {
+	margin: 10px 0 0;
+	padding-left: 18px;
+	display: grid;
+	gap: 6px;
+	color: #517075;
+	font-size: 12px;
+	line-height: 1.5;
 }
 
 .synchy-sync-scope-table__status {

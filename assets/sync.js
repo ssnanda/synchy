@@ -154,6 +154,55 @@
 			.join("");
 	};
 
+	const getFileBucketLabel = (scopeId, path) => {
+		const normalized = String(path || "").replace(/^\/+/, "");
+		const segments = normalized.split("/").filter(Boolean);
+
+		if (segments.length === 0) {
+			return config.strings.other || "Other";
+		}
+
+		if (scopeId === "files_plugins") {
+			return segments[1] || segments[0];
+		}
+
+		if (scopeId === "files_themes") {
+			return segments[1] || segments[0];
+		}
+
+		if (scopeId === "files_uploads") {
+			return segments[1] || segments[0];
+		}
+
+		return segments[0];
+	};
+
+	const buildFileBuckets = (scopeId, files) => {
+		const buckets = new Map();
+
+		files.forEach((file) => {
+			const path = String(file?.path || "");
+			const size = Number(file?.size || 0);
+			const bucketLabel = getFileBucketLabel(scopeId, path);
+
+			if (!buckets.has(bucketLabel)) {
+				buckets.set(bucketLabel, {
+					label: bucketLabel,
+					count: 0,
+					bytes: 0,
+					files: [],
+				});
+			}
+
+			const bucket = buckets.get(bucketLabel);
+			bucket.count += 1;
+			bucket.bytes += size;
+			bucket.files.push({ path, size });
+		});
+
+		return Array.from(buckets.values()).sort((left, right) => left.label.localeCompare(right.label));
+	};
+
 	const renderStages = (job) => {
 		if (!stages) {
 			return;
@@ -472,8 +521,8 @@
 
 		const fileGroupHtml = fileGroups
 			.map((group) => {
-				const paths = Array.isArray(group.paths) ? group.paths : [];
-				const visiblePaths = paths.slice(0, 200);
+				const files = Array.isArray(group.files) ? group.files : [];
+				const buckets = buildFileBuckets(String(group.id || ""), files);
 
 				return `
 					<div class="synchy-sync-tree__node">
@@ -492,13 +541,20 @@
 								<small>${escapeHtml(String(group.count || 0))} files • ${escapeHtml(formatBytes(group.bytes || 0))}</small>
 							</span>
 						</label>
-						<details class="synchy-sync-tree__details">
-							<summary>${escapeHtml(config.strings.changedFiles || "Changed files")}</summary>
-							<ul class="synchy-sync-tree__list">
-								${visiblePaths.map((path) => `<li>${escapeHtml(path)}</li>`).join("")}
-								${paths.length > visiblePaths.length ? `<li>${escapeHtml(`... and ${paths.length - visiblePaths.length} more files in this section.`)}</li>` : ""}
-							</ul>
-						</details>
+						<div class="synchy-sync-tree__groups">
+							${buckets.map((bucket) => {
+								const visibleFiles = bucket.files.slice(0, 100);
+								return `
+									<details class="synchy-sync-tree__details">
+										<summary>${escapeHtml(bucket.label)} <span>${escapeHtml(String(bucket.count))} files • ${escapeHtml(formatBytes(bucket.bytes))}</span></summary>
+										<ul class="synchy-sync-tree__list">
+											${visibleFiles.map((file) => `<li><span>${escapeHtml(file.path)}</span><small>${escapeHtml(formatBytes(file.size))}</small></li>`).join("")}
+											${bucket.files.length > visibleFiles.length ? `<li><span>${escapeHtml(`... and ${bucket.files.length - visibleFiles.length} more files`)}</span></li>` : ""}
+										</ul>
+									</details>
+								`;
+							}).join("")}
+						</div>
 					</div>
 				`;
 			})
