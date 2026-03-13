@@ -58,7 +58,8 @@
 	let pendingBaselineScopeIds = new Set((config.scopeStatus?.pendingBaselineScopeIds || []).map(String));
 	let changedScopeIds = new Set();
 	let currentJob = config.currentJob || null;
-	let connectionVerified = false;
+	let currentConnectionState = config.connectionState || null;
+	let connectionVerified = Boolean(currentConnectionState && currentConnectionState.status === "connected");
 	const initialConnectionState = {
 		destinationUrl: destinationUrlInput.value.trim(),
 		username: usernameInput.value.trim(),
@@ -229,11 +230,15 @@
 		const inputs = getPreviewSelectionInputs().filter((input) => input.type === "checkbox");
 
 		if (inputs.length === 0) {
-			return true;
+			return false;
 		}
 
 		return inputs.some((input) => input.checked);
 	};
+
+	const getHasPreviewChanges = () =>
+		latestPreview !== null
+		&& ((Number(latestPreview.filesCount || 0) > 0) || (Number(latestPreview.dbRows || 0) > 0));
 
 	const getHasPendingBaselineSelection = () =>
 		getSelectedScopeIds().some((scopeId) => pendingBaselineScopeIds.has(String(scopeId)));
@@ -303,11 +308,15 @@
 		&& usernameInput.value.trim() !== ""
 		&& (passwordInput.value.trim() !== "" || hasSavedPassword());
 
+	const hasConfirmedConnection = () =>
+		!getConnectionDirty()
+		&& (connectionVerified || currentConnectionState?.status === "connected");
+
 	const updateConnectionControls = () => {
 		const dirty = getConnectionDirty();
 
 		saveButton.disabled = busy || !dirty;
-		testButton.disabled = busy || !hasConnectionCoreValues() || connectionVerified;
+		testButton.disabled = busy || !hasConnectionCoreValues() || hasConfirmedConnection();
 
 		if (!inlineConnectionStatus) {
 			return;
@@ -315,9 +324,15 @@
 
 		inlineConnectionStatus.classList.remove("synchy-badge--muted", "synchy-badge--warning", "synchy-badge--connected");
 
-		if (connectionVerified) {
+		if (hasConfirmedConnection()) {
 			inlineConnectionStatus.textContent = config.strings.connected || "Connected";
 			inlineConnectionStatus.classList.add("synchy-badge--connected");
+			return;
+		}
+
+		if (!dirty && currentConnectionState?.status === "error" && hasConnectionCoreValues()) {
+			inlineConnectionStatus.textContent = config.strings.failed || "Failed";
+			inlineConnectionStatus.classList.add("synchy-badge--warning");
 			return;
 		}
 
@@ -338,7 +353,7 @@
 		const runLabel = getRunActionLabel();
 
 		previewButton.disabled = busy || !hasSelection;
-		runButton.disabled = busy || latestPreview === null || !hasSelection || !getHasSelectedPreviewItems();
+		runButton.disabled = busy || !hasSelection || !getHasPreviewChanges() || !getHasSelectedPreviewItems();
 		runButton.textContent = busy ? (config.strings.syncingAction || "Syncing...") : runLabel;
 
 		if (manualBaselineButton) {
@@ -386,6 +401,31 @@
 			{ label: config.strings.pluginVersion || "Plugin version", value: payload.pluginVersion || "" },
 			{ label: config.strings.authenticatedAs || "Authenticated as", value: payload.authenticatedAs || "" },
 		]);
+	};
+
+	const performConnectionTest = async () => {
+		try {
+			const data = await sendAjax("synchy_test_sync_connection");
+			currentConnectionState = {
+				status: "connected",
+				message: config.strings.connectionReady || "Connection ready",
+				remoteSite: data.remoteSite || {},
+			};
+			connectionVerified = true;
+			renderConnectionResult(data.remoteSite || {}, false);
+			updateConnectionControls();
+			return { ok: true, remoteSite: data.remoteSite || {} };
+		} catch (error) {
+			currentConnectionState = {
+				status: "error",
+				message: error.message,
+				remoteSite: {},
+			};
+			connectionVerified = false;
+			renderConnectionResult({ message: error.message }, true);
+			updateConnectionControls();
+			return { ok: false, message: error.message };
+		}
 	};
 
 	const renderPreviewTree = (preview) => {
@@ -653,14 +693,7 @@
 		setBusy(true);
 
 		try {
-			const data = await sendAjax("synchy_test_sync_connection");
-			connectionVerified = true;
-			renderConnectionResult(data.remoteSite || {}, false);
-			updateConnectionControls();
-		} catch (error) {
-			connectionVerified = false;
-			renderConnectionResult({ message: error.message }, true);
-			updateConnectionControls();
+			await performConnectionTest();
 		} finally {
 			setBusy(false);
 		}
@@ -675,9 +708,29 @@
 		setBusy(true);
 
 		try {
+			if (!hasConfirmedConnection()) {
+				const connectionCheck = await performConnectionTest();
+
+				if (!connectionCheck.ok) {
+					previewBadge.textContent = config.strings.previewError || "Preview failed";
+					previewMessage.textContent = connectionCheck.message || config.strings.connectionError || "Connection failed";
+					clearPreview();
+					return;
+				}
+			}
+
 			const data = await sendAjax("synchy_preview_sync_changes");
 			latestPreview = data.preview || null;
 			applyScopeStatus(data.scopeStatus || null);
+			if (data.remoteSite) {
+				currentConnectionState = {
+					status: "connected",
+					message: config.strings.connectionReady || "Connection ready",
+					remoteSite: data.remoteSite,
+				};
+				connectionVerified = true;
+				renderConnectionResult(data.remoteSite || {}, false);
+			}
 			renderPreview(latestPreview);
 		} catch (error) {
 			clearPreview();
@@ -839,6 +892,11 @@
 	updateTargetNote();
 	updateScopeRows();
 	renderProgress(currentJob);
+	if (currentConnectionState?.status === "connected") {
+		renderConnectionResult(currentConnectionState.remoteSite || {}, false);
+	} else if (currentConnectionState?.status === "error") {
+		renderConnectionResult({ message: currentConnectionState.message || (config.strings.connectionError || "Connection failed") }, true);
+	}
 
 	if (currentJob && currentJob.status === "running") {
 		setBusy(true);

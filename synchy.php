@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.32
+ * Version: 0.7.33
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.32';
+const SYNCHY_VERSION = '0.7.33';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -23,6 +23,7 @@ const SYNCHY_SITE_SYNC_JOB_OPTION = 'synchy_site_sync_job';
 const SYNCHY_SYNC_LAST_TIME_OPTION = 'syncy_last_sync_time';
 const SYNCHY_SYNC_STATUS_OPTION = 'synchy_sync_status';
 const SYNCHY_SYNC_JOB_OPTION = 'synchy_sync_job';
+const SYNCHY_SYNC_CONNECTION_STATE_OPTION = 'synchy_sync_connection_state';
 const SYNCHY_IMPORT_OPTIONS = 'synchy_import_options';
 const SYNCHY_IMPORT_RESULT_OPTION = 'synchy_import_result';
 const SYNCHY_NOTICE_PREFIX = 'synchy_admin_notice_';
@@ -916,6 +917,81 @@ function synchy_get_sync_last_time(): int
 	return max(0, (int) get_option(SYNCHY_SYNC_LAST_TIME_OPTION, 0));
 }
 
+function synchy_build_sync_connection_fingerprint(array $options): string
+{
+	$options = synchy_sanitize_site_sync_options($options);
+
+	return hash(
+		'sha256',
+		implode(
+			'|',
+			[
+				(string) ($options['destination_url'] ?? ''),
+				(string) ($options['destination_username'] ?? ''),
+				(string) ($options['destination_application_password'] ?? ''),
+				empty($options['verify_ssl']) ? '0' : '1',
+			]
+		)
+	);
+}
+
+function synchy_get_sync_connection_state(): array
+{
+	$value = get_option(SYNCHY_SYNC_CONNECTION_STATE_OPTION, []);
+
+	return is_array($value) ? $value : [];
+}
+
+function synchy_set_sync_connection_state(array $state): void
+{
+	update_option(SYNCHY_SYNC_CONNECTION_STATE_OPTION, $state, false);
+}
+
+function synchy_get_current_sync_connection_state(array $options): array
+{
+	$state = synchy_get_sync_connection_state();
+
+	if ($state === []) {
+		return [];
+	}
+
+	if ((string) ($state['fingerprint'] ?? '') !== synchy_build_sync_connection_fingerprint($options)) {
+		return [];
+	}
+
+	return $state;
+}
+
+function synchy_store_sync_connection_success(array $options, array $remote_site): array
+{
+	$state = [
+		'status' => 'connected',
+		'fingerprint' => synchy_build_sync_connection_fingerprint($options),
+		'checked_at' => gmdate('c'),
+		'message' => __('Destination site is ready for Sync.', 'synchy'),
+		'remoteSite' => $remote_site,
+	];
+
+	synchy_set_sync_connection_state($state);
+
+	return $state;
+}
+
+function synchy_store_sync_connection_error(array $options, string $message): array
+{
+	$state = [
+		'status' => 'error',
+		'fingerprint' => synchy_build_sync_connection_fingerprint($options),
+		'checked_at' => gmdate('c'),
+		'message' => $message,
+		'remoteSite' => [],
+	];
+
+	synchy_set_sync_connection_state($state);
+
+	return $state;
+}
+
 function synchy_set_sync_last_time(int $timestamp): void
 {
 	update_option(SYNCHY_SYNC_LAST_TIME_OPTION, max(0, $timestamp), false);
@@ -1027,6 +1103,11 @@ function synchy_get_sync_stage_items(array $job): array
 
 function synchy_update_sync_job(array $job): array
 {
+	if (!isset($job['created_at']) || !is_string($job['created_at']) || $job['created_at'] === '') {
+		$job['created_at'] = gmdate('c');
+	}
+
+	$job['updated_at'] = gmdate('c');
 	update_option(SYNCHY_SYNC_JOB_OPTION, $job, false);
 
 	return $job;
@@ -1044,6 +1125,18 @@ function synchy_get_running_sync_job(): array
 	$job = synchy_get_sync_job();
 
 	if (($job['status'] ?? '') !== 'running') {
+		return [];
+	}
+
+	$updated_at = strtotime((string) ($job['updated_at'] ?? $job['created_at'] ?? ''));
+
+	if ($updated_at > 0 && (time() - $updated_at) > 1800) {
+		$job['status'] = 'error';
+		$job['phase'] = 'error';
+		$job['progress'] = 100;
+		$job['message'] = __('This earlier Sync run appears to have been interrupted. Start a new preview or sync run when you are ready.', 'synchy');
+		synchy_update_sync_job($job);
+
 		return [];
 	}
 
@@ -7082,6 +7175,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 {
 	$options = synchy_get_site_sync_options();
 	$running_job = synchy_get_running_sync_job();
+	$connection_state = synchy_get_current_sync_connection_state($options);
 	$sync_stage_items = synchy_get_sync_stage_items($running_job);
 	$password_hint = synchy_get_site_sync_password_hint($options);
 	$scope_definitions = synchy_get_sync_scope_definitions();
@@ -7094,6 +7188,13 @@ function synchy_render_incremental_site_sync_page(array $current): void
 	$status_destination = (string) ($status['destinationUrl'] ?? $options['destination_url'] ?? __('Not set', 'synchy'));
 	$status_mode = ucfirst((string) ($status['mode'] ?? ($last_sync_time > 0 ? 'delta' : 'baseline')));
 	$status_duration = !empty($status['durationSeconds']) ? synchy_format_sync_duration((float) $status['durationSeconds']) : __('N/A', 'synchy');
+	$connection_state_status = (string) ($connection_state['status'] ?? '');
+	$connection_badge = __('Pending', 'synchy');
+	$connection_message = __('Use Test Connection to verify the destination Synchy receiver.', 'synchy');
+	$connection_inline_badge = __('Not checked', 'synchy');
+	$connection_inline_class = 'synchy-badge synchy-badge--muted';
+	$connection_remote_site = isset($connection_state['remoteSite']) && is_array($connection_state['remoteSite']) ? $connection_state['remoteSite'] : [];
+	$connection_panel_classes = 'synchy-panel synchy-site-sync-result is-hidden';
 	$status_summary = sprintf(
 		/* translators: 1: last sync timestamp, 2: destination URL, 3: files synced, 4: DB rows synced, 5: mode, 6: duration */
 		__('Last Sync: %1$s | %2$s | %3$s files | %4$s DB rows | %5$s | %6$s', 'synchy'),
@@ -7118,6 +7219,22 @@ function synchy_render_incremental_site_sync_page(array $current): void
 		$status_message = (string) ($status['message'] ?? __('No file or database changes were detected for Sync.', 'synchy'));
 	} elseif (!$scope_status['hasPendingBaseline']) {
 		$status_badge = __('Delta ready', 'synchy');
+	}
+
+	if ($connection_state_status === 'connected') {
+		$connection_badge = __('Connection ready', 'synchy');
+		$connection_message = (string) ($connection_state['message'] ?? __('Destination site is ready for Sync.', 'synchy'));
+		$connection_inline_badge = __('Connected', 'synchy');
+		$connection_inline_class = 'synchy-badge synchy-badge--connected';
+		$connection_panel_classes = 'synchy-panel synchy-site-sync-result';
+	} elseif ($connection_state_status === 'error') {
+		$connection_badge = __('Connection failed', 'synchy');
+		$connection_message = (string) ($connection_state['message'] ?? __('Synchy could not connect to the destination site.', 'synchy'));
+		$connection_inline_badge = __('Failed', 'synchy');
+		$connection_inline_class = 'synchy-badge synchy-badge--warning';
+		$connection_panel_classes = 'synchy-panel synchy-site-sync-result';
+	} elseif ((string) ($options['destination_url'] ?? '') === '' || (string) ($options['destination_username'] ?? '') === '' || (string) ($options['destination_application_password'] ?? '') === '') {
+		$connection_inline_badge = __('Incomplete', 'synchy');
 	}
 	?>
 	<div class="wrap synchy-admin">
@@ -7183,7 +7300,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 						<div class="synchy-field">
 							<div class="synchy-field-label-row">
 								<label class="synchy-label" for="synchy-sync-destination-password"><?php esc_html_e('Application Password', 'synchy'); ?></label>
-								<span class="synchy-badge synchy-badge--muted" data-synchy-sync-inline-status><?php esc_html_e('Not checked', 'synchy'); ?></span>
+								<span class="<?php echo esc_attr($connection_inline_class); ?>" data-synchy-sync-inline-status><?php echo esc_html($connection_inline_badge); ?></span>
 							</div>
 							<input
 								id="synchy-sync-destination-password"
@@ -7276,14 +7393,33 @@ function synchy_render_incremental_site_sync_page(array $current): void
 
 					</div>
 					<div class="synchy-stack">
-						<div class="synchy-panel synchy-site-sync-result is-hidden" data-synchy-sync-connection-result>
+						<div class="<?php echo esc_attr($connection_panel_classes); ?>" data-synchy-sync-connection-result>
 							<div class="synchy-stack synchy-stack--compact">
 								<div class="synchy-stack__split">
 									<h2><?php esc_html_e('Connection Check', 'synchy'); ?></h2>
-									<span class="synchy-badge" data-synchy-sync-connection-badge><?php esc_html_e('Pending', 'synchy'); ?></span>
+									<span class="synchy-badge" data-synchy-sync-connection-badge><?php echo esc_html($connection_badge); ?></span>
 								</div>
-								<p class="synchy-field-note" data-synchy-sync-connection-message><?php esc_html_e('Use Test Connection to verify the destination Synchy receiver.', 'synchy'); ?></p>
-								<div class="synchy-export-meta" data-synchy-sync-connection-meta></div>
+								<p class="synchy-field-note" data-synchy-sync-connection-message><?php echo esc_html($connection_message); ?></p>
+								<div class="synchy-export-meta" data-synchy-sync-connection-meta>
+									<?php if ($connection_state_status === 'connected') : ?>
+										<div>
+											<span class="synchy-export-meta__label"><?php esc_html_e('Site', 'synchy'); ?></span>
+											<strong><?php echo esc_html((string) ($connection_remote_site['name'] ?? '')); ?></strong>
+										</div>
+										<div>
+											<span class="synchy-export-meta__label"><?php esc_html_e('Destination', 'synchy'); ?></span>
+											<strong><?php echo esc_html((string) ($connection_remote_site['siteUrl'] ?? '')); ?></strong>
+										</div>
+										<div>
+											<span class="synchy-export-meta__label"><?php esc_html_e('Plugin version', 'synchy'); ?></span>
+											<strong><?php echo esc_html((string) ($connection_remote_site['pluginVersion'] ?? '')); ?></strong>
+										</div>
+										<div>
+											<span class="synchy-export-meta__label"><?php esc_html_e('Authenticated as', 'synchy'); ?></span>
+											<strong><?php echo esc_html((string) ($connection_remote_site['authenticatedAs'] ?? '')); ?></strong>
+										</div>
+									<?php endif; ?>
+								</div>
 							</div>
 						</div>
 
@@ -7758,6 +7894,14 @@ add_action('wp_ajax_synchy_preview_sync_changes', function (): void {
 	check_ajax_referer('synchy_sync_ajax', 'nonce');
 
 	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
+	$connection = synchy_test_site_sync_connection($options);
+
+	if (is_wp_error($connection)) {
+		synchy_store_sync_connection_error($options, $connection->get_error_message());
+		wp_send_json_error(['message' => $connection->get_error_message()], 400);
+	}
+
+	synchy_store_sync_connection_success($options, $connection);
 	$result = synchy_preview_sync_changes($options);
 
 	if (is_wp_error($result)) {
@@ -7767,6 +7911,7 @@ add_action('wp_ajax_synchy_preview_sync_changes', function (): void {
 	wp_send_json_success([
 		'preview' => $result,
 		'scopeStatus' => synchy_get_sync_scope_status($options),
+		'remoteSite' => $connection,
 	]);
 });
 
@@ -7781,9 +7926,11 @@ add_action('wp_ajax_synchy_test_sync_connection', function (): void {
 	$result = synchy_test_site_sync_connection($options);
 
 	if (is_wp_error($result)) {
+		synchy_store_sync_connection_error($options, $result->get_error_message());
 		wp_send_json_error(['message' => $result->get_error_message()], 400);
 	}
 
+	synchy_store_sync_connection_success($options, $result);
 	wp_send_json_success(['remoteSite' => $result]);
 });
 
@@ -7815,7 +7962,7 @@ add_action('wp_ajax_synchy_get_sync_job_status', function (): void {
 	check_ajax_referer('synchy_sync_ajax', 'nonce');
 
 	wp_send_json_success([
-		'job' => synchy_build_sync_job_response(synchy_get_sync_job()),
+		'job' => synchy_build_sync_job_response(synchy_get_running_sync_job()),
 	]);
 });
 
@@ -8285,12 +8432,14 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 				'ajaxUrl' => admin_url('admin-ajax.php'),
 				'nonce' => wp_create_nonce('synchy_sync_ajax'),
 				'currentJob' => synchy_build_sync_job_response(synchy_get_running_sync_job()),
+				'connectionState' => synchy_get_current_sync_connection_state(synchy_get_site_sync_options()),
 				'defaultStages' => synchy_get_sync_stage_items([]),
 				'scopeStatus' => synchy_get_sync_scope_status(synchy_get_site_sync_options()),
 				'strings' => [
 					'connectionReady' => __('Connection ready', 'synchy'),
 					'connectionError' => __('Connection failed', 'synchy'),
 					'connected' => __('Connected', 'synchy'),
+					'failed' => __('Failed', 'synchy'),
 					'needsRetest' => __('Needs retest', 'synchy'),
 					'notChecked' => __('Not checked', 'synchy'),
 					'incomplete' => __('Incomplete', 'synchy'),
