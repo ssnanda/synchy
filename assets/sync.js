@@ -406,9 +406,7 @@
 		runButton.textContent = busy ? (config.strings.syncingAction || "Syncing...") : runLabel;
 
 		if (manualBaselineButton) {
-			const showManualBaseline = hasSelection && getHasPendingBaselineSelection();
-			manualBaselineButton.style.display = showManualBaseline ? "" : "none";
-			manualBaselineButton.disabled = busy || !showManualBaseline;
+			manualBaselineButton.disabled = busy || !hasSelection;
 		}
 	};
 

@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.36
+ * Version: 0.7.37
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.36';
+const SYNCHY_VERSION = '0.7.37';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -7442,7 +7442,6 @@ function synchy_render_incremental_site_sync_page(array $current): void
 											type="button"
 											class="button"
 											data-synchy-mark-baseline
-											<?php echo $scope_status['hasPendingBaseline'] ? '' : 'style="display:none"'; ?>
 										>
 											<?php esc_html_e('Mark Manual Baseline Complete', 'synchy'); ?>
 										</button>
