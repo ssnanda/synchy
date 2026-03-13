@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.33
+ * Version: 0.7.34
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.33';
+const SYNCHY_VERSION = '0.7.34';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -7894,14 +7894,6 @@ add_action('wp_ajax_synchy_preview_sync_changes', function (): void {
 	check_ajax_referer('synchy_sync_ajax', 'nonce');
 
 	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
-	$connection = synchy_test_site_sync_connection($options);
-
-	if (is_wp_error($connection)) {
-		synchy_store_sync_connection_error($options, $connection->get_error_message());
-		wp_send_json_error(['message' => $connection->get_error_message()], 400);
-	}
-
-	synchy_store_sync_connection_success($options, $connection);
 	$result = synchy_preview_sync_changes($options);
 
 	if (is_wp_error($result)) {
@@ -7911,7 +7903,6 @@ add_action('wp_ajax_synchy_preview_sync_changes', function (): void {
 	wp_send_json_success([
 		'preview' => $result,
 		'scopeStatus' => synchy_get_sync_scope_status($options),
-		'remoteSite' => $connection,
 	]);
 });
 
