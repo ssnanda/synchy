@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.40
+ * Version: 0.7.41
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.40';
+const SYNCHY_VERSION = '0.7.41';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -4529,10 +4529,13 @@ function synchy_get_sync_replacements(array $manifest): array
 
 function synchy_build_sync_sql_from_manifest(array $manifest, string $sql_path)
 {
+	global $wpdb;
+
 	$database = isset($manifest['database']) && is_array($manifest['database']) ? $manifest['database'] : [];
 	$tables = isset($database['tables']) && is_array($database['tables']) ? $database['tables'] : [];
 	$replacements = synchy_get_sync_replacements($manifest);
 	$prepared_tables = [];
+	$prepared_option_rows = [];
 
 	foreach ($tables as $table => $data) {
 		if (!is_array($data)) {
@@ -4551,6 +4554,11 @@ function synchy_build_sync_sql_from_manifest(array $manifest, string $sql_path)
 			$prepared_rows[] = synchy_sync_apply_replacements($row, $replacements, $changed);
 		}
 
+		if ($table === $wpdb->options) {
+			$prepared_option_rows = $prepared_rows;
+			continue;
+		}
+
 		$prepared_tables[$table] = [
 			'rows' => $prepared_rows,
 			'key_columns' => array_values((array) ($data['keyColumns'] ?? [])),
@@ -4566,8 +4574,92 @@ function synchy_build_sync_sql_from_manifest(array $manifest, string $sql_path)
 
 	return [
 		'tables' => $prepared_tables,
-		'totalRows' => array_sum(array_map(static fn(array $table): int => count((array) ($table['rows'] ?? [])), $prepared_tables)),
+		'optionRows' => $prepared_option_rows,
+		'totalRows' => array_sum(array_map(static fn(array $table): int => count((array) ($table['rows'] ?? [])), $prepared_tables)) + count($prepared_option_rows),
 	];
+}
+
+function synchy_normalize_sync_option_autoload($autoload)
+{
+	if (is_bool($autoload)) {
+		return $autoload ? 'yes' : 'no';
+	}
+
+	$autoload = strtolower(trim((string) $autoload));
+
+	if ($autoload === '') {
+		return null;
+	}
+
+	$truthy = ['yes', 'on', 'true', '1', 'auto', 'auto-on', 'auto-yes'];
+	$falsy = ['no', 'off', 'false', '0', 'auto-off', 'auto-no'];
+
+	if (in_array($autoload, $truthy, true)) {
+		return 'yes';
+	}
+
+	if (in_array($autoload, $falsy, true)) {
+		return 'no';
+	}
+
+	return null;
+}
+
+function synchy_apply_sync_option_rows(array $rows)
+{
+	global $wpdb;
+
+	if ($rows === []) {
+		return 0;
+	}
+
+	$applied = 0;
+
+	foreach ($rows as $row) {
+		if (!is_array($row)) {
+			continue;
+		}
+
+		$option_name = isset($row['option_name']) ? (string) $row['option_name'] : '';
+
+		if ($option_name === '') {
+			continue;
+		}
+
+		$option_value = array_key_exists('option_value', $row) ? maybe_unserialize($row['option_value']) : null;
+		$autoload = synchy_normalize_sync_option_autoload($row['autoload'] ?? null);
+		$exists = get_option($option_name, null);
+
+		if ($exists === null) {
+			if ($autoload === null) {
+				add_option($option_name, $option_value);
+			} else {
+				add_option($option_name, $option_value, '', $autoload === 'yes');
+			}
+		} elseif ($autoload === null) {
+			update_option($option_name, $option_value);
+		} else {
+			update_option($option_name, $option_value, $autoload === 'yes');
+		}
+
+		if ($autoload !== null) {
+			$wpdb->update(
+				$wpdb->options,
+				['autoload' => $autoload],
+				['option_name' => $option_name],
+				['%s'],
+				['%s']
+			);
+		}
+
+		wp_cache_delete($option_name, 'options');
+		$applied++;
+	}
+
+	wp_cache_delete('alloptions', 'options');
+	wp_load_alloptions(true);
+
+	return $applied;
 }
 
 function synchy_iterate_sync_sql_statements(string $sql_path, callable $callback): int
@@ -4851,6 +4943,8 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 			return new WP_Error($executed->get_error_code(), $executed->get_error_message(), ['status' => 500]);
 		}
 
+		$applied_option_rows = synchy_apply_sync_option_rows((array) ($prepared_sql['optionRows'] ?? []));
+
 		$synced_at = max(0, (int) ($manifest['syncedAt'] ?? time()));
 		$files_synced = (int) ($manifest['files']['count'] ?? 0);
 		$db_rows_synced = (int) ($prepared_sql['totalRows'] ?? 0);
@@ -4872,6 +4966,7 @@ function synchy_handle_remote_sync_request(WP_REST_Request $request)
 				$files_synced,
 				$db_rows_synced
 			),
+			'optionRowsApplied' => $applied_option_rows,
 		]);
 
 		synchy_clear_sync_caches();
