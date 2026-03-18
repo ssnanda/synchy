@@ -11,6 +11,8 @@
 	const previewButton = document.querySelector("[data-synchy-preview-sync]");
 	const runButton = document.querySelector("[data-synchy-run-sync]");
 	const fullSyncButton = document.querySelector("[data-synchy-run-full-sync]");
+	const pauseSyncButton = document.querySelector("[data-synchy-pause-sync]");
+	const resumeSyncButton = document.querySelector("[data-synchy-resume-sync]");
 	const manualBaselineButton = document.querySelector("[data-synchy-mark-baseline]");
 	const destinationUrlInput = document.querySelector("[data-synchy-sync-url]");
 	const usernameInput = document.querySelector("[data-synchy-sync-username]");
@@ -42,6 +44,8 @@
 		!previewButton ||
 		!runButton ||
 		!fullSyncButton ||
+		!pauseSyncButton ||
+		!resumeSyncButton ||
 		!manualBaselineButton ||
 		!saveButton ||
 		!destinationUrlInput ||
@@ -259,7 +263,11 @@
 		}
 
 		if (progressDetail) {
-			progressDetail.textContent = `${config.strings.selectedChanges || "Selected changes"}: ${Number(job.filesCount || 0).toLocaleString()} files, ${Number(job.dbRows || 0).toLocaleString()} DB rows`;
+			if (job?.runMode === "full" && Number(job.totalBatches || 0) > 0) {
+				progressDetail.textContent = `${config.strings.batches || "Batches"}: ${Number(job.completedBatches || 0).toLocaleString()} / ${Number(job.totalBatches || 0).toLocaleString()}${job.currentBatchLabel ? ` | ${config.strings.currentBatch || "Current batch"}: ${job.currentBatchLabel}` : ""}`;
+			} else {
+				progressDetail.textContent = `${config.strings.selectedChanges || "Selected changes"}: ${Number(job.filesCount || 0).toLocaleString()} files, ${Number(job.dbRows || 0).toLocaleString()} DB rows`;
+			}
 		}
 
 		renderStages(job);
@@ -280,6 +288,10 @@
 	const getPreviewSelectionInputs = () => Array.from(form.querySelectorAll("[data-synchy-preview-selection]"));
 
 	const getHasSelectedPreviewItems = () => {
+		if (latestPreviewMode === "full" || Array.isArray(latestPreview?.batches)) {
+			return getHasPreviewChanges();
+		}
+
 		const inputs = getPreviewSelectionInputs().filter((input) => input.type === "checkbox");
 
 		if (inputs.length === 0) {
@@ -295,6 +307,10 @@
 
 	const getHasPendingBaselineSelection = () =>
 		getSelectedScopeIds().some((scopeId) => pendingBaselineScopeIds.has(String(scopeId)));
+
+	const getIsRunningFullSync = () => currentJob?.runMode === "full" && currentJob?.status === "running";
+	const getHasResumableFullSync = () =>
+		currentJob?.runMode === "full" && ["paused", "failed_partial"].includes(String(currentJob?.status || ""));
 
 	const getRunActionLabel = () =>
 		latestPreviewMode === "full" || Boolean(latestPreview?.forceFull)
@@ -410,12 +426,18 @@
 		const hasPreviewChanges = getHasPreviewChanges();
 		const hasSelectedPreviewItems = getHasSelectedPreviewItems();
 		const hasFullSyncPreview = latestPreview !== null && (latestPreviewMode === "full" || Boolean(latestPreview?.forceFull));
+		const runningFullSync = getIsRunningFullSync();
+		const resumableFullSync = getHasResumableFullSync();
 
 		previewButton.disabled = busy || !hasSelection;
-		runButton.disabled = busy || !hasSelection || !hasPreviewChanges || !hasSelectedPreviewItems;
-		fullSyncButton.disabled = busy || !hasSelection || hasFullSyncPreview;
+		runButton.disabled = busy || !hasSelection || !hasPreviewChanges || !hasSelectedPreviewItems || runningFullSync || resumableFullSync;
+		fullSyncButton.disabled = (busy && !runningFullSync) || !hasSelection || hasFullSyncPreview || runningFullSync || resumableFullSync;
+		pauseSyncButton.disabled = !runningFullSync;
+		resumeSyncButton.disabled = runningFullSync || !resumableFullSync;
 		runButton.textContent = busy ? (config.strings.syncingAction || "Syncing...") : runLabel;
 		fullSyncButton.textContent = config.strings.fullSync || "Full Sync";
+		pauseSyncButton.textContent = currentJob?.pauseRequested ? (config.strings.pausePending || "Pause requested") : (config.strings.pauseSync || "Pause Sync");
+		resumeSyncButton.textContent = config.strings.resumeSync || "Resume Sync";
 
 		if (manualBaselineButton) {
 			manualBaselineButton.disabled = busy || !hasSelection;
@@ -489,6 +511,42 @@
 
 	const renderPreviewTree = (preview) => {
 		if (!previewTreeContainer) {
+			return;
+		}
+
+		const activeBatchSource = Array.isArray(currentJob?.batches) && currentJob.batches.length > 0
+			? currentJob.batches
+			: Array.isArray(preview?.batches) ? preview.batches : [];
+
+		if (activeBatchSource.length > 0) {
+			changedScopeIds = new Set(activeBatchSource.map((batch) => String(batch.scopeId || "")).filter(Boolean));
+			updateScopeRows();
+			previewTreeContainer.innerHTML = `
+				<div class="synchy-sync-tree__section">
+					<h4>${escapeHtml(config.strings.batches || "Batches")}</h4>
+					${activeBatchSource.map((batch) => {
+						const status = String(batch?.status || "pending");
+						const marker = status === "complete" ? "[x]" : status === "running" ? "[>]" : status === "failed" ? "[!]" : status === "paused" ? "[|]" : "[ ]";
+						const detail = Number(batch?.fileCount || 0) > 0
+							? `${Number(batch.fileCount || 0).toLocaleString()} files • ${formatBytes(batch.workUnits || 0)}`
+							: `${Number(batch?.dbRows || 0).toLocaleString()} rows`;
+
+						return `
+							<div class="synchy-sync-tree__node">
+								<div class="synchy-sync-tree__toggle">
+									<span>
+										<strong>${escapeHtml(`${marker} ${batch?.label || ""}`)}</strong>
+										<small>${escapeHtml(detail)}</small>
+									</span>
+								</div>
+								${batch?.error ? `<p class="synchy-sync-tree__sample">${escapeHtml(batch.error)}</p>` : ""}
+							</div>
+						`;
+					}).join("")}
+				</div>
+			`;
+			previewTreeContainer.classList.remove("is-hidden");
+			updateActionButtons();
 			return;
 		}
 
@@ -618,8 +676,13 @@
 
 	const renderPreview = (preview) => {
 		if (!preview) {
-			previewBadge.textContent = "";
-			previewMessage.textContent = config.strings.previewDefault || "Run Preview Changes to load the pending file sections and database tables.";
+			if (getIsRunningFullSync() || getHasResumableFullSync()) {
+				previewBadge.textContent = config.strings.fullSync || "Full Sync";
+				previewMessage.textContent = currentJob?.message || (config.strings.previewDefault || "Run Preview Changes to load the pending file sections and database tables.");
+			} else {
+				previewBadge.textContent = "";
+				previewMessage.textContent = config.strings.previewDefault || "Run Preview Changes to load the pending file sections and database tables.";
+			}
 			renderPreviewTree(null);
 			return;
 		}
@@ -633,6 +696,8 @@
 
 		if (filesCount === 0 && dbRows === 0) {
 			previewMessage.textContent = "No pending changes detected since the last successful Sync.";
+		} else if (Array.isArray(preview?.batches) && preview.batches.length > 0) {
+			previewMessage.textContent = `Full Sync will run ${Number(preview.totalBatches || 0).toLocaleString()} logical batches for the selected scopes.`;
 		} else {
 			previewMessage.textContent = config.strings.previewSelectionHelp || "Review the pending file sections and database tables, then uncheck anything you do not want to send.";
 		}
@@ -644,6 +709,8 @@
 		switch (String(status?.status || "")) {
 			case "success":
 				return config.strings.success || "Success";
+			case "paused":
+				return config.strings.paused || "Paused";
 			case "error":
 				return config.strings.error || "Error";
 			case "idle":
@@ -662,7 +729,7 @@
 	};
 
 	const buildStatusSummary = (status) => {
-		if (String(status?.status || "") === "error") {
+		if (["error", "paused"].includes(String(status?.status || ""))) {
 			return getStatusMessage(status);
 		}
 
@@ -739,6 +806,7 @@
 			const data = await sendAjax("synchy_get_sync_job_status");
 			currentJob = data.job || null;
 			renderProgress(currentJob);
+			renderPreviewTree(latestPreview);
 
 			if (currentJob && currentJob.status === "running") {
 				window.setTimeout(pollSyncJob, 250);
@@ -878,7 +946,9 @@
 			"",
 			`Destination: ${destinationUrl || "Not set"}`,
 			`Scopes: ${scopeLabels.join(", ") || "None"}`,
-			`Selected preview items: ${selectedFileSections} file sections, ${selectedDbTables} DB tables`,
+			isFullSync
+				? `Planned batches: ${Number(latestPreview?.totalBatches || 0).toLocaleString()}`
+				: `Selected preview items: ${selectedFileSections} file sections, ${selectedDbTables} DB tables`,
 		].join("\n");
 
 		if (!window.confirm(confirmMessage)) {
@@ -888,15 +958,21 @@
 		setBusy(true);
 		currentJob = {
 			status: "running",
+			runMode: isFullSync ? "full" : "delta",
 			phase: "building_package",
 			phaseLabel: config.strings.syncRunning || "Sync running",
 			progress: 5,
 			message: "Starting Sync...",
 			filesCount: Number(latestPreview?.filesCount || 0),
 			dbRows: Number(latestPreview?.dbRows || 0),
+			totalBatches: Number(latestPreview?.totalBatches || 0),
+			completedBatches: 0,
+			currentBatchLabel: "",
+			batches: Array.isArray(latestPreview?.batches) ? latestPreview.batches : [],
 			stages: Array.isArray(config.defaultStages) ? config.defaultStages : [],
 		};
 		renderProgress(currentJob);
+		renderPreviewTree(latestPreview);
 		window.setTimeout(pollSyncJob, 100);
 		statusBadge.textContent = config.strings.syncingAction || "Syncing...";
 		statusSummary.textContent = "Sync is running. Keep this tab open until it finishes.";
@@ -907,9 +983,12 @@
 			});
 			currentJob = data.job || null;
 			renderProgress(currentJob);
+			renderPreviewTree(latestPreview);
 			renderStatus(data.status || {});
 			applyScopeStatus(data.scopeStatus || null);
-			clearPreview();
+			if (!getHasResumableFullSync()) {
+				clearPreview();
+			}
 		} catch (error) {
 			renderStatus({
 				status: "error",
@@ -921,6 +1000,59 @@
 				durationSeconds: 0,
 				destinationUrl: destinationUrl || "",
 				mode: "",
+			});
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	const pauseFullSync = async () => {
+		try {
+			const data = await sendAjax("synchy_pause_full_sync");
+			currentJob = data.job || null;
+			renderProgress(currentJob);
+			renderPreviewTree(latestPreview);
+			updateActionButtons();
+		} catch (error) {
+			renderStatus({
+				status: "error",
+				message: error.message,
+				at: new Date().toISOString(),
+			});
+		}
+	};
+
+	const resumeFullSync = async () => {
+		if (!window.confirm(config.strings.confirmResumeSync || "Resume the remaining full Sync batches now?")) {
+			return;
+		}
+
+		setBusy(true);
+		currentJob = {
+			...(currentJob || {}),
+			status: "running",
+			runMode: "full",
+			pauseRequested: false,
+			phase: "sending_package",
+			phaseLabel: config.strings.syncRunning || "Sync running",
+			message: "Resuming Sync...",
+		};
+		renderProgress(currentJob);
+		renderPreviewTree(latestPreview);
+		window.setTimeout(pollSyncJob, 100);
+
+		try {
+			const data = await sendAjax("synchy_resume_full_sync");
+			currentJob = data.job || null;
+			renderProgress(currentJob);
+			renderPreviewTree(latestPreview);
+			renderStatus(data.status || {});
+			applyScopeStatus(data.scopeStatus || null);
+		} catch (error) {
+			renderStatus({
+				status: "error",
+				message: error.message,
+				at: new Date().toISOString(),
 			});
 		} finally {
 			setBusy(false);
@@ -968,11 +1100,14 @@
 	previewButton.addEventListener("click", () => runPreview("delta"));
 	fullSyncButton.addEventListener("click", () => runPreview("full"));
 	runButton.addEventListener("click", runSync);
+	pauseSyncButton.addEventListener("click", pauseFullSync);
+	resumeSyncButton.addEventListener("click", resumeFullSync);
 	manualBaselineButton.addEventListener("click", runManualBaseline);
 
 	updateTargetNote();
 	updateScopeRows();
 	renderProgress(currentJob);
+	renderPreviewTree(latestPreview);
 	if (currentConnectionState?.status === "connected") {
 		renderConnectionResult(currentConnectionState.remoteSite || {}, false);
 	} else if (currentConnectionState?.status === "error") {

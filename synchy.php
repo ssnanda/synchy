@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.43
+ * Version: 0.7.44
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.43';
+const SYNCHY_VERSION = '0.7.44';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -1193,25 +1193,9 @@ function synchy_get_sync_job(): array
 
 function synchy_get_running_sync_job(): array
 {
-	$job = synchy_get_sync_job();
+	$job = synchy_get_visible_sync_job();
 
-	if (($job['status'] ?? '') !== 'running') {
-		return [];
-	}
-
-	$updated_at = strtotime((string) ($job['updated_at'] ?? $job['created_at'] ?? ''));
-
-	if ($updated_at > 0 && (time() - $updated_at) > 1800) {
-		$job['status'] = 'error';
-		$job['phase'] = 'error';
-		$job['progress'] = 100;
-		$job['message'] = __('This earlier Sync run appears to have been interrupted. Start a new preview or sync run when you are ready.', 'synchy');
-		synchy_update_sync_job($job);
-
-		return [];
-	}
-
-	return $job;
+	return (($job['status'] ?? '') === 'running') ? $job : [];
 }
 
 function synchy_build_sync_job_response(array $job): array
@@ -1224,16 +1208,44 @@ function synchy_build_sync_job_response(array $job): array
 
 	return [
 		'id' => (string) ($job['job_id'] ?? ''),
+		'syncId' => (string) ($job['sync_id'] ?? ''),
 		'status' => (string) ($job['status'] ?? ''),
+		'runMode' => (string) ($job['run_mode'] ?? 'delta'),
+		'resumable' => !empty($job['resumable']),
+		'pauseRequested' => !empty($job['pause_requested']),
 		'phase' => (string) ($job['phase'] ?? ''),
 		'phaseLabel' => synchy_sync_phase_label((string) ($job['phase'] ?? '')),
 		'message' => (string) ($job['message'] ?? ''),
 		'progress' => (int) round((float) ($job['progress'] ?? 0)),
 		'createdAt' => (string) ($job['created_at'] ?? ''),
+		'updatedAt' => (string) ($job['updated_at'] ?? ''),
 		'destinationUrl' => (string) ($job['destination_url'] ?? ''),
 		'filesCount' => (int) ($job['files_count'] ?? 0),
 		'dbRows' => (int) ($job['db_rows'] ?? 0),
+		'totalBatches' => (int) ($job['total_batches'] ?? 0),
+		'completedBatches' => (int) ($job['completed_batches'] ?? 0),
+		'currentBatchIndex' => (int) ($job['current_batch_index'] ?? 0),
+		'currentBatchLabel' => (string) ($job['current_batch_label'] ?? ''),
+		'completedWorkUnits' => (int) ($job['completed_work_units'] ?? 0),
+		'totalWorkUnits' => (int) ($job['total_work_units'] ?? 0),
 		'selectedScopeLabels' => array_values(array_filter((array) ($job['selected_scope_labels'] ?? []), 'is_string')),
+		'batches' => array_values(array_map(
+			static function (array $batch): array {
+				return [
+					'batchId' => (string) ($batch['batch_id'] ?? ''),
+					'type' => (string) ($batch['type'] ?? ''),
+					'scopeId' => (string) ($batch['scope_id'] ?? ''),
+					'label' => (string) ($batch['label'] ?? ''),
+					'sequence' => (int) ($batch['sequence'] ?? 0),
+					'status' => (string) ($batch['status'] ?? 'pending'),
+					'fileCount' => (int) ($batch['file_count'] ?? 0),
+					'dbRows' => (int) ($batch['db_rows'] ?? 0),
+					'workUnits' => (int) ($batch['work_units'] ?? 0),
+					'error' => (string) ($batch['error_message'] ?? ''),
+				];
+			},
+			array_values(array_filter((array) ($job['batches'] ?? []), 'is_array'))
+		)),
 		'stages' => synchy_get_sync_stage_items($job),
 	];
 }
@@ -1242,6 +1254,7 @@ function synchy_start_sync_job(array $options): array
 {
 	return synchy_update_sync_job([
 		'job_id' => wp_generate_uuid4(),
+		'run_mode' => 'delta',
 		'status' => 'running',
 		'phase' => 'building_package',
 		'progress' => 10,
@@ -1266,6 +1279,106 @@ function synchy_mark_sync_job_error(array $job, string $message): array
 	$job['progress'] = 100;
 
 	return synchy_update_sync_job($job);
+}
+
+function synchy_write_full_sync_batch_payload(string $job_dir, array $batch): array|WP_Error
+{
+	$sequence = (int) ($batch['sequence'] ?? 0);
+	$payload_path = wp_normalize_path(trailingslashit($job_dir) . 'batch-' . str_pad((string) $sequence, 3, '0', STR_PAD_LEFT) . '.json');
+	$json = wp_json_encode(
+		[
+			'files' => array_values((array) ($batch['files'] ?? [])),
+			'tables' => (array) ($batch['tables'] ?? []),
+		],
+		JSON_UNESCAPED_SLASHES
+	);
+
+	if ($json === false || file_put_contents($payload_path, $json) === false) {
+		return new WP_Error('synchy_full_sync_batch_payload_failed', __('Synchy could not save the full Sync batch payload.', 'synchy'));
+	}
+
+	return [
+		'payload_path' => $payload_path,
+	];
+}
+
+function synchy_read_full_sync_batch_payload(array $batch): array
+{
+	$path = (string) ($batch['payload_path'] ?? '');
+
+	if ($path === '' || !is_readable($path)) {
+		return [
+			'files' => [],
+			'tables' => [],
+		];
+	}
+
+	$decoded = json_decode((string) file_get_contents($path), true);
+
+	return is_array($decoded) ? $decoded : ['files' => [], 'tables' => []];
+}
+
+function synchy_build_full_sync_job(array $options, array $payload)
+{
+	$job_id = wp_generate_uuid4();
+	$job_dir = synchy_prepare_sync_job_dir($job_id);
+
+	if (is_wp_error($job_dir)) {
+		return $job_dir;
+	}
+
+	$batches = synchy_build_full_sync_batches(
+		(array) ($payload['file_delta'] ?? []),
+		(array) ($payload['db_delta'] ?? [])
+	);
+	$total_work_units = 0;
+	$files_count = 0;
+	$db_rows = 0;
+
+	foreach ($batches as &$batch) {
+		$payload_written = synchy_write_full_sync_batch_payload($job_dir, $batch);
+
+		if (is_wp_error($payload_written)) {
+			synchy_rrmdir($job_dir);
+			return $payload_written;
+		}
+
+		$batch['payload_path'] = (string) ($payload_written['payload_path'] ?? '');
+		unset($batch['files'], $batch['tables']);
+		$total_work_units += (int) ($batch['work_units'] ?? 0);
+		$files_count += (int) ($batch['file_count'] ?? 0);
+		$db_rows += (int) ($batch['db_rows'] ?? 0);
+	}
+	unset($batch);
+
+	return synchy_update_sync_job([
+		'job_id' => $job_id,
+		'sync_id' => (string) (($payload['summary']['syncId'] ?? '') ?: ('full-' . gmdate('YmdHis') . '-' . strtolower(wp_generate_password(6, false, false)))),
+		'run_mode' => 'full',
+		'status' => 'running',
+		'resumable' => true,
+		'pause_requested' => false,
+		'phase' => 'building_package',
+		'progress' => 1,
+		'message' => __('Preparing the full Sync batch plan.', 'synchy'),
+		'created_at' => gmdate('c'),
+		'destination_url' => (string) ($options['destination_url'] ?? ''),
+		'selected_scope_labels' => (array) (($payload['summary']['selectedScopeLabels'] ?? [])),
+		'selected_scope_ids' => (array) (($payload['summary']['selectedScopes'] ?? [])),
+		'options_signature' => synchy_build_sync_options_signature($options),
+		'files_count' => $files_count,
+		'db_rows' => $db_rows,
+		'total_batches' => count($batches),
+		'completed_batches' => 0,
+		'current_batch_index' => 0,
+		'current_batch_label' => '',
+		'completed_work_units' => 0,
+		'total_work_units' => $total_work_units,
+		'batches' => $batches,
+		'next_state' => (array) ($payload['next_state'] ?? []),
+		'summary' => (array) ($payload['summary'] ?? []),
+		'temp_dir' => $job_dir,
+	]);
 }
 
 function synchy_build_sync_manual_baseline_fingerprints(array $selected_scope_ids): array
@@ -1472,6 +1585,95 @@ function synchy_prepare_sync_temp_dir(string $suffix = '')
 	}
 
 	return $dir;
+}
+
+function synchy_get_full_sync_batch_max_bytes(): int
+{
+	return 50 * 1024 * 1024;
+}
+
+function synchy_get_full_sync_batch_max_files(): int
+{
+	return 500;
+}
+
+function synchy_get_full_sync_batch_max_rows(): int
+{
+	return 1000;
+}
+
+function synchy_prepare_sync_job_dir(string $job_id)
+{
+	$root = synchy_get_sync_temp_root();
+	$job_id = sanitize_key($job_id);
+
+	if ($root === '' || $job_id === '') {
+		return new WP_Error('synchy_sync_job_dir_missing', __('Synchy could not resolve the full Sync job workspace.', 'synchy'));
+	}
+
+	if (!wp_mkdir_p($root)) {
+		return new WP_Error('synchy_sync_job_dir_root_failed', __('Synchy could not create the full Sync job workspace.', 'synchy'));
+	}
+
+	$dir = wp_normalize_path(trailingslashit($root) . $job_id . '-full-sync');
+
+	if (is_dir($dir)) {
+		synchy_rrmdir($dir);
+	}
+
+	if (!wp_mkdir_p($dir)) {
+		return new WP_Error('synchy_sync_job_dir_failed', __('Synchy could not create the working folder for this full Sync job.', 'synchy'));
+	}
+
+	return $dir;
+}
+
+function synchy_build_sync_options_signature(array $options): string
+{
+	$selected_scope_ids = synchy_get_selected_sync_scope_ids($options);
+
+	return md5((string) wp_json_encode([
+		'destination_url' => (string) ($options['destination_url'] ?? ''),
+		'destination_username' => (string) ($options['destination_username'] ?? ''),
+		'verify_ssl' => !empty($options['verify_ssl']) ? '1' : '0',
+		'selected_scopes' => array_values($selected_scope_ids),
+	], JSON_UNESCAPED_SLASHES));
+}
+
+function synchy_is_resumable_sync_job_status(string $status): bool
+{
+	return in_array($status, ['paused', 'failed_partial'], true);
+}
+
+function synchy_get_visible_sync_job(): array
+{
+	$job = synchy_get_sync_job();
+
+	if ($job === []) {
+		return [];
+	}
+
+	$status = (string) ($job['status'] ?? '');
+
+	if ($status === 'running') {
+		$updated_at = strtotime((string) ($job['updated_at'] ?? $job['created_at'] ?? ''));
+
+		if ($updated_at > 0 && (time() - $updated_at) > 1800) {
+			$job['status'] = !empty($job['sync_id']) ? 'failed_partial' : 'error';
+			$job['phase'] = 'error';
+			$job['progress'] = (int) ($job['progress'] ?? 0);
+			$job['message'] = __('This earlier Sync run appears to have been interrupted. Resume it or start a new preview when you are ready.', 'synchy');
+			$job['resumable'] = !empty($job['sync_id']);
+			synchy_update_sync_job($job);
+			return $job;
+		}
+	}
+
+	if ($status === 'running' || synchy_is_resumable_sync_job_status($status)) {
+		return $job;
+	}
+
+	return [];
 }
 
 function synchy_get_sync_active_theme_slugs(): array
@@ -2334,7 +2536,7 @@ function synchy_build_sync_preview_tree(array $file_delta, array $db_delta): arr
 	];
 }
 
-function synchy_build_sync_package(array $options, bool $preview_only = false, array $selection = [], bool $force_full = false)
+function synchy_prepare_sync_payload(array $options, array $selection = [], bool $force_full = false): array|WP_Error
 {
 	$state = synchy_get_sync_state();
 	$selected_scope_ids = synchy_get_selected_sync_scope_ids($options);
@@ -2347,7 +2549,7 @@ function synchy_build_sync_package(array $options, bool $preview_only = false, a
 	$file_delta = synchy_collect_sync_file_delta($state, synchy_get_selected_sync_scope_ids($options, 'files'), $force_full);
 	$db_delta = synchy_build_sync_database_delta($state, synchy_get_selected_sync_scope_ids($options, 'database'), $force_full);
 
-	if (!$preview_only && !empty($selection['selection_present'])) {
+	if (!$force_full && !empty($selection['selection_present'])) {
 		$file_delta = synchy_filter_sync_file_delta_by_selection($file_delta, $selection);
 		$db_delta = synchy_filter_sync_database_delta_by_selection($db_delta, $selection);
 	}
@@ -2376,6 +2578,7 @@ function synchy_build_sync_package(array $options, bool $preview_only = false, a
 		),
 		'scope_sync_times' => $scope_sync_times,
 	];
+
 	$summary = [
 		'mode' => $baseline_scope_ids !== [] ? 'baseline' : 'delta',
 		'filesCount' => (int) ($manifest['files']['count'] ?? 0),
@@ -2392,6 +2595,378 @@ function synchy_build_sync_package(array $options, bool $preview_only = false, a
 		'previewTree' => synchy_build_sync_preview_tree($file_delta, $db_delta),
 		'forceFull' => $force_full,
 	];
+
+	return [
+		'file_delta' => $file_delta,
+		'db_delta' => $db_delta,
+		'manifest' => $manifest,
+		'next_state' => $next_state,
+		'summary' => $summary,
+	];
+}
+
+function synchy_write_sync_package_from_parts(array $file_delta, array $db_delta, int $sync_time, array $options, string $temp_dir)
+{
+	$manifest = synchy_build_sync_manifest($file_delta, $db_delta, $sync_time, $options);
+	$manifest_path = wp_normalize_path(trailingslashit($temp_dir) . 'manifest.json');
+	$sql_path = wp_normalize_path(trailingslashit($temp_dir) . 'delta.sql');
+	$zip_path = wp_normalize_path(trailingslashit($temp_dir) . 'sync-package.zip');
+	$manifest_json = wp_json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+
+	if ($manifest_json === false || file_put_contents($manifest_path, $manifest_json) === false) {
+		return new WP_Error('synchy_sync_manifest_write_failed', __('Synchy could not write the sync manifest file.', 'synchy'));
+	}
+
+	$sql_written = synchy_write_sync_sql_file((array) ($db_delta['tables'] ?? []), $sql_path);
+
+	if (is_wp_error($sql_written)) {
+		return $sql_written;
+	}
+
+	$zip = new ZipArchive();
+	$result = $zip->open($zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+
+	if ($result !== true) {
+		return new WP_Error('synchy_sync_zip_open_failed', __('Synchy could not open the sync package for writing.', 'synchy'));
+	}
+
+	foreach ((array) ($file_delta['files'] ?? []) as $file) {
+		if (!$zip->addFile((string) $file['absolute_path'], (string) $file['archive_path'])) {
+			$zip->close();
+			return new WP_Error(
+				'synchy_sync_zip_add_file_failed',
+				sprintf(
+					/* translators: %s: file path inside the archive */
+					__('Synchy could not add %s to the sync package.', 'synchy'),
+					(string) $file['archive_path']
+				)
+			);
+		}
+	}
+
+	$zip->addFile($sql_path, '.synchy-sync/db/delta.sql');
+	$zip->addFile($manifest_path, '.synchy-sync/db/manifest.json');
+	$zip->close();
+
+	return [
+		'manifest' => $manifest,
+		'zip_path' => $zip_path,
+		'manifest_path' => $manifest_path,
+		'sql_path' => $sql_path,
+	];
+}
+
+function synchy_get_full_sync_file_batch_group(string $scope_id, string $archive_path): array
+{
+	$segments = array_values(array_filter(explode('/', ltrim(wp_normalize_path($archive_path), '/')), 'strlen'));
+	$root = $segments[0] ?? '';
+
+	if ($scope_id === 'files_plugins') {
+		$slug = $segments[1] ?? basename($archive_path);
+		return [
+			'key' => 'plugin:' . $slug,
+			'label' => 'Plugin / ' . $slug,
+			'path' => $root . '/' . $slug,
+		];
+	}
+
+	if ($scope_id === 'files_themes') {
+		$slug = $segments[1] ?? basename($archive_path);
+		return [
+			'key' => 'theme:' . $slug,
+			'label' => 'Theme / ' . $slug,
+			'path' => $root . '/' . $slug,
+		];
+	}
+
+	if ($scope_id === 'files_uploads') {
+		$year = $segments[1] ?? '';
+		$month = $segments[2] ?? '';
+
+		if (preg_match('/^\d{4}$/', $year) && preg_match('/^\d{2}$/', $month)) {
+			return [
+				'key' => 'uploads:' . $year . '/' . $month,
+				'label' => 'Uploads / ' . $year . ' / ' . $month,
+				'path' => $root . '/' . $year . '/' . $month,
+			];
+		}
+
+		if ($year !== '') {
+			return [
+				'key' => 'uploads:' . $year,
+				'label' => 'Uploads / ' . $year,
+				'path' => $root . '/' . $year,
+			];
+		}
+
+		return [
+			'key' => 'uploads:root',
+			'label' => 'Uploads / Root',
+			'path' => $root,
+		];
+	}
+
+	return [
+		'key' => $scope_id . ':' . ($segments[1] ?? ($segments[0] ?? 'root')),
+		'label' => $archive_path,
+		'path' => $archive_path,
+	];
+}
+
+function synchy_finalize_full_sync_file_batch(array $base_batch, array $files, int $part_number = 0): array
+{
+	$total_bytes = 0;
+
+	foreach ($files as $file) {
+		$total_bytes += (int) ($file['size'] ?? 0);
+	}
+
+	$part_suffix = $part_number > 0 ? '-part-' . str_pad((string) $part_number, 2, '0', STR_PAD_LEFT) : '';
+	$label = (string) ($base_batch['label'] ?? '') . ($part_number > 0 ? ' / Part ' . $part_number : '');
+
+	return [
+		'batch_id' => sanitize_key((string) ($base_batch['batch_id'] ?? '') . $part_suffix),
+		'type' => 'files',
+		'scope_id' => (string) ($base_batch['scope_id'] ?? ''),
+		'label' => $label,
+		'object_path' => (string) ($base_batch['object_path'] ?? ''),
+		'file_count' => count($files),
+		'db_rows' => 0,
+		'work_units' => $total_bytes,
+		'files' => array_values($files),
+		'tables' => [],
+	];
+}
+
+function synchy_split_full_sync_file_batch(array $base_batch, array $files): array
+{
+	usort(
+		$files,
+		static fn(array $left, array $right): int => strcmp((string) ($left['archive_path'] ?? ''), (string) ($right['archive_path'] ?? ''))
+	);
+
+	$max_bytes = synchy_get_full_sync_batch_max_bytes();
+	$max_files = synchy_get_full_sync_batch_max_files();
+	$chunks = [];
+	$current = [];
+	$current_bytes = 0;
+	$part = 1;
+
+	foreach ($files as $file) {
+		$size = (int) ($file['size'] ?? 0);
+		$would_exceed = $current !== [] && (($current_bytes + $size) > $max_bytes || count($current) >= $max_files);
+
+		if ($would_exceed) {
+			$chunks[] = synchy_finalize_full_sync_file_batch($base_batch, $current, count($chunks) > 0 || count($files) > count($current) ? $part : 0);
+			$current = [];
+			$current_bytes = 0;
+			$part++;
+		}
+
+		$current[] = $file;
+		$current_bytes += $size;
+	}
+
+	if ($current !== []) {
+		$chunks[] = synchy_finalize_full_sync_file_batch($base_batch, $current, count($chunks) > 0 ? $part : 0);
+	}
+
+	return $chunks;
+}
+
+function synchy_split_full_sync_database_batch(array $base_batch, array $tables): array
+{
+	$max_rows = synchy_get_full_sync_batch_max_rows();
+	$batches = [];
+	$current_tables = [];
+	$current_rows = 0;
+	$part = 1;
+
+	foreach ($tables as $table_name => $table_data) {
+		$rows = array_values((array) ($table_data['rows'] ?? []));
+		$row_ids = array_values((array) ($table_data['row_ids'] ?? []));
+		$key_columns = array_values((array) ($table_data['key_columns'] ?? []));
+		$update_columns = array_values((array) ($table_data['update_columns'] ?? []));
+
+		foreach (array_chunk($rows, $max_rows) as $row_index => $row_chunk) {
+			$id_chunk = array_slice($row_ids, $row_index * $max_rows, count($row_chunk));
+
+			if ($current_rows > 0 && ($current_rows + count($row_chunk)) > $max_rows) {
+				$batches[] = [
+					'batch_id' => sanitize_key((string) ($base_batch['batch_id'] ?? '') . '-part-' . str_pad((string) $part, 2, '0', STR_PAD_LEFT)),
+					'type' => 'database',
+					'scope_id' => (string) ($base_batch['scope_id'] ?? ''),
+					'label' => (string) ($base_batch['label'] ?? '') . ' / Part ' . $part,
+					'object_path' => (string) ($base_batch['object_path'] ?? ''),
+					'file_count' => 0,
+					'db_rows' => $current_rows,
+					'work_units' => $current_rows,
+					'files' => [],
+					'tables' => $current_tables,
+				];
+				$current_tables = [];
+				$current_rows = 0;
+				$part++;
+			}
+
+			$current_tables[$table_name] = [
+				'scope_id' => (string) ($table_data['scope_id'] ?? ''),
+				'key_columns' => $key_columns,
+				'update_columns' => $update_columns,
+				'rows' => $row_chunk,
+				'row_ids' => $id_chunk,
+			];
+			$current_rows += count($row_chunk);
+		}
+	}
+
+	if ($current_rows > 0) {
+		$batches[] = [
+			'batch_id' => sanitize_key((string) ($base_batch['batch_id'] ?? '') . (count($batches) > 0 ? '-part-' . str_pad((string) $part, 2, '0', STR_PAD_LEFT) : '')),
+			'type' => 'database',
+			'scope_id' => (string) ($base_batch['scope_id'] ?? ''),
+			'label' => (string) ($base_batch['label'] ?? '') . (count($batches) > 0 ? ' / Part ' . $part : ''),
+			'object_path' => (string) ($base_batch['object_path'] ?? ''),
+			'file_count' => 0,
+			'db_rows' => $current_rows,
+			'work_units' => $current_rows,
+			'files' => [],
+			'tables' => $current_tables,
+		];
+	}
+
+	return $batches;
+}
+
+function synchy_build_full_sync_batches(array $file_delta, array $db_delta): array
+{
+	$batches = [];
+	$file_groups = [];
+
+	foreach ((array) ($file_delta['files'] ?? []) as $file) {
+		$scope_id = (string) ($file['scope_id'] ?? '');
+
+		if ($scope_id === '') {
+			continue;
+		}
+
+		$group = synchy_get_full_sync_file_batch_group($scope_id, (string) ($file['archive_path'] ?? ''));
+		$key = $scope_id . '|' . (string) ($group['key'] ?? '');
+
+		if (!isset($file_groups[$key])) {
+			$file_groups[$key] = [
+				'batch_id' => sanitize_key('batch-file-' . $scope_id . '-' . md5((string) ($group['path'] ?? $group['key'] ?? ''))),
+				'scope_id' => $scope_id,
+				'label' => (string) ($group['label'] ?? $scope_id),
+				'object_path' => (string) ($group['path'] ?? ''),
+				'files' => [],
+			];
+		}
+
+		$file_groups[$key]['files'][] = $file;
+	}
+
+	foreach ($file_groups as $group) {
+		$chunks = synchy_split_full_sync_file_batch(
+			[
+				'batch_id' => (string) $group['batch_id'],
+				'scope_id' => (string) $group['scope_id'],
+				'label' => (string) $group['label'],
+				'object_path' => (string) $group['object_path'],
+			],
+			(array) ($group['files'] ?? [])
+		);
+		$batches = array_merge($batches, $chunks);
+	}
+
+	$scope_labels = [
+		'db_content' => 'Database / Posts & Post Meta',
+		'db_options' => 'Database / Options',
+		'db_taxonomies' => 'Database / Terms & Taxonomies',
+	];
+	$db_scope_tables = [];
+
+	foreach ((array) ($db_delta['tables'] ?? []) as $table_name => $table_data) {
+		$scope_id = (string) ($table_data['scope_id'] ?? '');
+
+		if ($scope_id === '') {
+			continue;
+		}
+
+		if (!isset($db_scope_tables[$scope_id])) {
+			$db_scope_tables[$scope_id] = [];
+		}
+
+		$db_scope_tables[$scope_id][$table_name] = $table_data;
+	}
+
+	foreach ($db_scope_tables as $scope_id => $tables) {
+		$batches = array_merge(
+			$batches,
+			synchy_split_full_sync_database_batch(
+				[
+					'batch_id' => sanitize_key('batch-db-' . $scope_id),
+					'scope_id' => (string) $scope_id,
+					'label' => $scope_labels[$scope_id] ?? ('Database / ' . $scope_id),
+					'object_path' => (string) $scope_id,
+				],
+				$tables
+			)
+		);
+	}
+
+	foreach ($batches as $index => &$batch) {
+		$batch['sequence'] = $index + 1;
+		$batch['status'] = 'pending';
+	}
+	unset($batch);
+
+	return $batches;
+}
+
+function synchy_build_full_sync_preview_batches(array $batches): array
+{
+	return array_values(
+		array_map(
+			static function (array $batch): array {
+				return [
+					'batchId' => (string) ($batch['batch_id'] ?? ''),
+					'type' => (string) ($batch['type'] ?? ''),
+					'scopeId' => (string) ($batch['scope_id'] ?? ''),
+					'label' => (string) ($batch['label'] ?? ''),
+					'sequence' => (int) ($batch['sequence'] ?? 0),
+					'status' => (string) ($batch['status'] ?? 'pending'),
+					'fileCount' => (int) ($batch['file_count'] ?? 0),
+					'dbRows' => (int) ($batch['db_rows'] ?? 0),
+					'workUnits' => (int) ($batch['work_units'] ?? 0),
+				];
+			},
+			$batches
+		)
+	);
+}
+
+function synchy_build_sync_package(array $options, bool $preview_only = false, array $selection = [], bool $force_full = false)
+{
+	$payload = synchy_prepare_sync_payload($options, $selection, $force_full);
+
+	if (is_wp_error($payload)) {
+		return $payload;
+	}
+
+	$file_delta = (array) ($payload['file_delta'] ?? []);
+	$db_delta = (array) ($payload['db_delta'] ?? []);
+	$manifest = (array) ($payload['manifest'] ?? []);
+	$next_state = (array) ($payload['next_state'] ?? []);
+	$summary = (array) ($payload['summary'] ?? []);
+
+	if ($force_full) {
+		$batches = synchy_build_full_sync_batches($file_delta, $db_delta);
+		$summary['syncId'] = 'full-' . gmdate('YmdHis') . '-' . strtolower(wp_generate_password(6, false, false));
+		$summary['batches'] = synchy_build_full_sync_preview_batches($batches);
+		$summary['totalBatches'] = count($batches);
+		$summary['totalWorkUnits'] = array_sum(array_map(static fn(array $batch): int => (int) ($batch['work_units'] ?? 0), $batches));
+	}
 
 	if ($preview_only) {
 		return [
@@ -2416,60 +2991,20 @@ function synchy_build_sync_package(array $options, bool $preview_only = false, a
 		return $temp_dir;
 	}
 
-	$manifest_path = wp_normalize_path(trailingslashit($temp_dir) . 'manifest.json');
-	$sql_path = wp_normalize_path(trailingslashit($temp_dir) . 'delta.sql');
-	$zip_path = wp_normalize_path(trailingslashit($temp_dir) . 'sync-package.zip');
-	$manifest_json = wp_json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+	$package_written = synchy_write_sync_package_from_parts($file_delta, $db_delta, (int) ($summary['syncedAt'] ?? time()), $options, $temp_dir);
 
-	if ($manifest_json === false || file_put_contents($manifest_path, $manifest_json) === false) {
+	if (is_wp_error($package_written)) {
 		synchy_rrmdir($temp_dir);
 
-		return new WP_Error('synchy_sync_manifest_write_failed', __('Synchy could not write the sync manifest file.', 'synchy'));
+		return $package_written;
 	}
-
-	$sql_written = synchy_write_sync_sql_file((array) ($db_delta['tables'] ?? []), $sql_path);
-
-	if (is_wp_error($sql_written)) {
-		synchy_rrmdir($temp_dir);
-
-		return $sql_written;
-	}
-
-	$zip = new ZipArchive();
-	$result = $zip->open($zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE);
-
-	if ($result !== true) {
-		synchy_rrmdir($temp_dir);
-
-		return new WP_Error('synchy_sync_zip_open_failed', __('Synchy could not open the sync package for writing.', 'synchy'));
-	}
-
-	foreach ((array) ($file_delta['files'] ?? []) as $file) {
-		if (!$zip->addFile((string) $file['absolute_path'], (string) $file['archive_path'])) {
-			$zip->close();
-			synchy_rrmdir($temp_dir);
-
-			return new WP_Error(
-				'synchy_sync_zip_add_file_failed',
-				sprintf(
-					/* translators: %s: file path inside the archive */
-					__('Synchy could not add %s to the sync package.', 'synchy'),
-					(string) $file['archive_path']
-				)
-			);
-		}
-	}
-
-	$zip->addFile($sql_path, '.synchy-sync/db/delta.sql');
-	$zip->addFile($manifest_path, '.synchy-sync/db/manifest.json');
-	$zip->close();
 
 	return [
 		'preview' => $summary,
-		'manifest' => $manifest,
+		'manifest' => (array) ($package_written['manifest'] ?? $manifest),
 		'next_state' => $next_state,
 		'temp_dir' => $temp_dir,
-		'zip_path' => $zip_path,
+		'zip_path' => (string) ($package_written['zip_path'] ?? ''),
 	];
 }
 
@@ -4390,7 +4925,7 @@ function synchy_get_sync_remote_route_url(array $options): string
 	return trailingslashit((string) $options['destination_url']) . 'wp-json/syncy/v1/sync';
 }
 
-function synchy_sync_remote_request(array $options, int $expected_sync_time, string $zip_path)
+function synchy_sync_remote_request(array $options, int $expected_sync_time, string $zip_path, array $extra_headers = [])
 {
 	$validation = synchy_validate_site_sync_options($options);
 
@@ -4413,14 +4948,14 @@ function synchy_sync_remote_request(array $options, int $expected_sync_time, str
 		[
 			'timeout' => 600,
 			'sslverify' => !empty($options['verify_ssl']),
-			'headers' => [
+			'headers' => array_merge([
 				'Authorization' => 'Basic ' . base64_encode(
 					(string) $options['destination_username'] . ':' . (string) $options['destination_application_password']
 				),
 				'Content-Type' => 'application/zip',
 				'Accept' => 'application/json',
 				'X-Syncy-Filename' => basename($zip_path),
-			],
+			], $extra_headers),
 			'body' => $body,
 			'data_format' => 'body',
 		]
@@ -4508,6 +5043,280 @@ function synchy_wait_for_remote_sync_completion(array $options, int $expected_sy
 	return $last_error instanceof WP_Error
 		? $last_error
 		: new WP_Error('synchy_sync_remote_status_timeout', __('The destination site did not confirm whether the timed-out Sync finished successfully.', 'synchy'));
+}
+
+function synchy_build_sync_batch_request_headers(array $job, array $batch): array
+{
+	return [
+		'X-Syncy-Sync-Id' => (string) ($job['sync_id'] ?? ''),
+		'X-Syncy-Batch-Id' => (string) ($batch['batch_id'] ?? ''),
+		'X-Syncy-Batch-Label' => rawurlencode((string) ($batch['label'] ?? '')),
+		'X-Syncy-Batch-Type' => (string) ($batch['type'] ?? ''),
+		'X-Syncy-Batch-Sequence' => (string) ((int) ($batch['sequence'] ?? 0)),
+	];
+}
+
+function synchy_build_sync_batch_package(array $options, array $job, array $batch)
+{
+	$batch_payload = synchy_read_full_sync_batch_payload($batch);
+	$temp_dir = synchy_prepare_sync_temp_dir('full-batch');
+
+	if (is_wp_error($temp_dir)) {
+		return $temp_dir;
+	}
+
+	$file_delta = [
+		'mode' => 'baseline',
+		'files' => array_values((array) ($batch_payload['files'] ?? [])),
+		'count' => (int) ($batch['file_count'] ?? 0),
+		'bytes' => array_sum(array_map(static fn(array $file): int => (int) ($file['size'] ?? 0), (array) ($batch_payload['files'] ?? []))),
+		'baseline_scopes' => [(string) ($batch['scope_id'] ?? '')],
+		'selected_scopes' => [(string) ($batch['scope_id'] ?? '')],
+	];
+	$db_tables = (array) ($batch_payload['tables'] ?? []);
+	$db_total_rows = 0;
+
+	foreach ($db_tables as $table_data) {
+		$db_total_rows += count((array) ($table_data['rows'] ?? []));
+	}
+
+	$db_delta = [
+		'mode' => 'baseline',
+		'tables' => $db_tables,
+		'table_counts' => array_map(static fn(array $table): int => count((array) ($table['rows'] ?? [])), $db_tables),
+		'total_rows' => $db_total_rows,
+		'current_fingerprints' => [],
+		'baseline_scopes' => [(string) ($batch['scope_id'] ?? '')],
+		'selected_scopes' => [(string) ($batch['scope_id'] ?? '')],
+	];
+	$sync_time = max(0, (int) ($job['sync_time_base'] ?? time())) + max(1, (int) ($batch['sequence'] ?? 1));
+	$written = synchy_write_sync_package_from_parts($file_delta, $db_delta, $sync_time, $options, $temp_dir);
+
+	if (is_wp_error($written)) {
+		synchy_rrmdir($temp_dir);
+		return $written;
+	}
+
+	return [
+		'temp_dir' => $temp_dir,
+		'zip_path' => (string) ($written['zip_path'] ?? ''),
+		'sync_time' => $sync_time,
+	];
+}
+
+function synchy_calculate_full_sync_job_progress(array $job): int
+{
+	$total = max(1, (int) ($job['total_work_units'] ?? 0));
+	$completed = max(0, (int) ($job['completed_work_units'] ?? 0));
+
+	return min(99, (int) floor(($completed / $total) * 100));
+}
+
+function synchy_mark_full_sync_batch_complete(array $job, int $index): array
+{
+	$batch = (array) ($job['batches'][$index] ?? []);
+	$job['batches'][$index]['status'] = 'complete';
+	$job['batches'][$index]['completed_at'] = gmdate('c');
+	$job['batches'][$index]['error_message'] = '';
+	$job['completed_batches'] = (int) ($job['completed_batches'] ?? 0) + 1;
+	$job['completed_work_units'] = (int) ($job['completed_work_units'] ?? 0) + (int) ($batch['work_units'] ?? 0);
+	$job['progress'] = synchy_calculate_full_sync_job_progress($job);
+
+	return $job;
+}
+
+function synchy_mark_full_sync_batch_failed(array $job, int $index, string $message): array
+{
+	$job['batches'][$index]['status'] = 'failed';
+	$job['batches'][$index]['error_message'] = $message;
+	$job['batches'][$index]['failed_at'] = gmdate('c');
+	$job['status'] = 'failed_partial';
+	$job['phase'] = 'error';
+	$job['resumable'] = true;
+	$job['pause_requested'] = false;
+	$job['message'] = $message;
+	synchy_set_sync_status([
+		'status' => 'error',
+		'mode' => 'baseline',
+		'filesSynced' => (int) ($job['files_count'] ?? 0),
+		'dbRowsSynced' => (int) ($job['db_rows'] ?? 0),
+		'durationSeconds' => 0,
+		'destinationUrl' => (string) ($job['destination_url'] ?? ''),
+		'selectedScopeLabels' => (array) ($job['selected_scope_labels'] ?? []),
+		'at' => gmdate('c'),
+		'message' => $message,
+		'lastSyncTime' => synchy_get_sync_last_time(),
+	]);
+
+	return synchy_update_sync_job($job);
+}
+
+function synchy_finalize_full_sync_success(array $job, array $options, float $started_at): array
+{
+	$next_state = isset($job['next_state']) && is_array($job['next_state']) ? $job['next_state'] : [];
+	$next_state['last_result'] = [
+		'mode' => 'baseline',
+		'filesSynced' => (int) ($job['files_count'] ?? 0),
+		'dbRowsSynced' => (int) ($job['db_rows'] ?? 0),
+		'at' => gmdate('c'),
+	];
+
+	$state_written = synchy_write_sync_state($next_state);
+	$sync_time = max(0, (int) ($next_state['last_sync_time'] ?? time()));
+	synchy_set_sync_last_time($sync_time);
+	$duration = round(microtime(true) - $started_at, 2);
+	$job['status'] = 'complete';
+	$job['phase'] = 'complete';
+	$job['progress'] = 100;
+	$job['resumable'] = false;
+	$job['pause_requested'] = false;
+	$job['current_batch_label'] = '';
+	$job['message'] = sprintf(
+		__('Full Sync finished: %1$d files, %2$d DB rows, %3$d batches in %4$s.', 'synchy'),
+		(int) ($job['files_count'] ?? 0),
+		(int) ($job['db_rows'] ?? 0),
+		(int) ($job['total_batches'] ?? 0),
+		synchy_format_sync_duration($duration)
+	);
+	synchy_update_sync_job($job);
+
+	$status = [
+		'status' => 'success',
+		'mode' => 'baseline',
+		'filesSynced' => (int) ($job['files_count'] ?? 0),
+		'dbRowsSynced' => (int) ($job['db_rows'] ?? 0),
+		'durationSeconds' => $duration,
+		'destinationUrl' => (string) ($options['destination_url'] ?? ''),
+		'selectedScopeLabels' => (array) ($job['selected_scope_labels'] ?? []),
+		'at' => gmdate('c'),
+		'lastSyncTime' => $sync_time,
+		'message' => $job['message'],
+	];
+
+	if (is_wp_error($state_written)) {
+		$status['message'] .= ' ' . __('The live site finished, but Synchy could not update the local sync state file.', 'synchy');
+	}
+
+	synchy_set_sync_status($status);
+
+	if (!empty($job['temp_dir']) && is_dir((string) $job['temp_dir'])) {
+		synchy_rrmdir((string) $job['temp_dir']);
+	}
+
+	return $status;
+}
+
+function synchy_execute_full_sync_job(array $job, array $options, float $started_at)
+{
+	$batches = array_values(array_filter((array) ($job['batches'] ?? []), 'is_array'));
+
+	foreach ($batches as $index => $batch) {
+		$state = (string) ($job['batches'][$index]['status'] ?? 'pending');
+
+		if ($state === 'complete') {
+			continue;
+		}
+
+		$job['status'] = 'running';
+		$job['phase'] = 'sending_package';
+		$job['current_batch_index'] = $index + 1;
+		$job['current_batch_label'] = (string) ($batch['label'] ?? '');
+		$job['message'] = sprintf(
+			__('Syncing batch %1$d of %2$d: %3$s', 'synchy'),
+			$index + 1,
+			count($batches),
+			(string) ($batch['label'] ?? '')
+		);
+		$job['batches'][$index]['status'] = 'running';
+		synchy_update_sync_job($job);
+
+		$package = synchy_build_sync_batch_package($options, $job, $batch);
+
+		if (is_wp_error($package)) {
+			return synchy_mark_full_sync_batch_failed($job, $index, $package->get_error_message());
+		}
+
+		$remote = synchy_sync_remote_request(
+			$options,
+			(int) ($package['sync_time'] ?? 0),
+			(string) ($package['zip_path'] ?? ''),
+			synchy_build_sync_batch_request_headers($job, $batch)
+		);
+
+		if (!empty($package['temp_dir']) && is_dir((string) $package['temp_dir'])) {
+			synchy_rrmdir((string) $package['temp_dir']);
+		}
+
+		if (is_wp_error($remote)) {
+			return synchy_mark_full_sync_batch_failed($job, $index, $remote->get_error_message());
+		}
+
+		$job = synchy_mark_full_sync_batch_complete($job, $index);
+		synchy_update_sync_job($job);
+
+		if (!empty($job['pause_requested']) && ($index + 1) < count($batches)) {
+			$job['status'] = 'paused';
+			$job['phase'] = 'complete';
+			$job['message'] = __('Full Sync paused after the current batch. Resume to continue the remaining items.', 'synchy');
+			$job['resumable'] = true;
+			$job['current_batch_label'] = '';
+			synchy_update_sync_job($job);
+			synchy_set_sync_status([
+				'status' => 'paused',
+				'mode' => 'baseline',
+				'filesSynced' => (int) ($job['files_count'] ?? 0),
+				'dbRowsSynced' => (int) ($job['db_rows'] ?? 0),
+				'durationSeconds' => round(microtime(true) - $started_at, 2),
+				'destinationUrl' => (string) ($options['destination_url'] ?? ''),
+				'selectedScopeLabels' => (array) ($job['selected_scope_labels'] ?? []),
+				'at' => gmdate('c'),
+				'message' => $job['message'],
+				'lastSyncTime' => synchy_get_sync_last_time(),
+			]);
+			return $job;
+		}
+	}
+
+	return synchy_finalize_full_sync_success($job, $options, $started_at);
+}
+
+function synchy_pause_full_sync_job(): array|WP_Error
+{
+	$job = synchy_get_sync_job();
+
+	if (($job['run_mode'] ?? '') !== 'full' || ($job['status'] ?? '') !== 'running') {
+		return new WP_Error('synchy_full_sync_not_running', __('There is no running full Sync to pause right now.', 'synchy'));
+	}
+
+	$job['pause_requested'] = true;
+	$job['message'] = __('Pause requested. Synchy will stop after the current batch finishes.', 'synchy');
+
+	return synchy_update_sync_job($job);
+}
+
+function synchy_resume_full_sync_job(array $options)
+{
+	$job = synchy_get_sync_job();
+
+	if (($job['run_mode'] ?? '') !== 'full' || !synchy_is_resumable_sync_job_status((string) ($job['status'] ?? ''))) {
+		return new WP_Error('synchy_full_sync_not_resumable', __('There is no paused or partial full Sync available to resume.', 'synchy'));
+	}
+
+	if ((string) ($job['options_signature'] ?? '') !== synchy_build_sync_options_signature($options)) {
+		return new WP_Error('synchy_full_sync_resume_mismatch', __('The saved full Sync no longer matches the current destination or scope settings. Run a fresh Full Sync preview first.', 'synchy'));
+	}
+
+	if (empty($job['temp_dir']) || !is_dir((string) $job['temp_dir'])) {
+		return new WP_Error('synchy_full_sync_resume_missing', __('Synchy could not find the saved full Sync plan on disk. Run a fresh Full Sync preview first.', 'synchy'));
+	}
+
+	$job['status'] = 'running';
+	$job['phase'] = 'sending_package';
+	$job['pause_requested'] = false;
+	$job['message'] = __('Resuming the remaining full Sync batches.', 'synchy');
+	synchy_update_sync_job($job);
+
+	return synchy_execute_full_sync_job($job, $options, microtime(true));
 }
 
 function synchy_sync_apply_replacements($value, array $replacements, bool &$changed)
@@ -5108,6 +5917,47 @@ function synchy_run_sync_changes(array $raw_options)
 	}
 
 	$started = microtime(true);
+
+	if ($force_full) {
+		$payload = synchy_prepare_sync_payload($options, $selection, true);
+
+		if (is_wp_error($payload)) {
+			synchy_set_sync_status([
+				'status' => 'error',
+				'message' => $payload->get_error_message(),
+				'at' => gmdate('c'),
+			]);
+
+			return $payload;
+		}
+
+		$job = synchy_build_full_sync_job($options, $payload);
+
+		if (is_wp_error($job)) {
+			synchy_set_sync_status([
+				'status' => 'error',
+				'message' => $job->get_error_message(),
+				'at' => gmdate('c'),
+			]);
+
+			return $job;
+		}
+
+		$job['sync_time_base'] = (int) (($payload['summary']['syncedAt'] ?? time()) * 100);
+		synchy_update_sync_job($job);
+		$result = synchy_execute_full_sync_job($job, $options, $started);
+
+		if (is_wp_error($result)) {
+			return $result;
+		}
+
+		if (is_array($result) && isset($result['status']) && synchy_is_resumable_sync_job_status((string) $result['status'])) {
+			return synchy_get_sync_status();
+		}
+
+		return is_array($result) ? $result : synchy_get_sync_status();
+	}
+
 	$job = synchy_start_sync_job($options);
 	$package = synchy_build_sync_package($options, false, $selection, $force_full);
 
@@ -7624,6 +8474,8 @@ function synchy_render_incremental_site_sync_page(array $current): void
 										<button type="button" class="button" data-synchy-preview-sync><?php esc_html_e('Preview Changes', 'synchy'); ?></button>
 										<button type="button" class="button button-primary button-large" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
 										<button type="button" class="button" data-synchy-run-full-sync disabled><?php esc_html_e('Full Sync', 'synchy'); ?></button>
+										<button type="button" class="button" data-synchy-pause-sync disabled><?php esc_html_e('Pause Sync', 'synchy'); ?></button>
+										<button type="button" class="button" data-synchy-resume-sync disabled><?php esc_html_e('Resume Sync', 'synchy'); ?></button>
 										<button
 											type="button"
 											class="button"
@@ -8254,7 +9106,46 @@ add_action('wp_ajax_synchy_get_sync_job_status', function (): void {
 	check_ajax_referer('synchy_sync_ajax', 'nonce');
 
 	wp_send_json_success([
-		'job' => synchy_build_sync_job_response(synchy_get_running_sync_job()),
+		'job' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
+	]);
+});
+
+add_action('wp_ajax_synchy_pause_full_sync', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to pause a Synchy full Sync.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	$result = synchy_pause_full_sync_job();
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(['message' => $result->get_error_message()], 400);
+	}
+
+	wp_send_json_success([
+		'job' => synchy_build_sync_job_response($result),
+	]);
+});
+
+add_action('wp_ajax_synchy_resume_full_sync', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to resume a Synchy full Sync.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
+	$result = synchy_resume_full_sync_job($options);
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(['message' => $result->get_error_message()], 400);
+	}
+
+	wp_send_json_success([
+		'status' => synchy_get_sync_status(),
+		'job' => synchy_build_sync_job_response(synchy_get_sync_job()),
+		'scopeStatus' => synchy_get_sync_scope_status($options),
 	]);
 });
 
@@ -8739,7 +9630,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 			[
 				'ajaxUrl' => admin_url('admin-ajax.php'),
 				'nonce' => wp_create_nonce('synchy_sync_ajax'),
-				'currentJob' => synchy_build_sync_job_response(synchy_get_running_sync_job()),
+				'currentJob' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
 				'connectionState' => synchy_get_current_sync_connection_state(synchy_get_site_sync_options()),
 				'defaultStages' => synchy_get_sync_stage_items([]),
 				'scopeStatus' => synchy_get_sync_scope_status(synchy_get_site_sync_options()),
@@ -8756,8 +9647,12 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'startBaseline' => __('Start Baseline', 'synchy'),
 					'pushChanges' => __('Push Changes', 'synchy'),
 					'fullSync' => __('Full Sync', 'synchy'),
+					'pauseSync' => __('Pause Sync', 'synchy'),
+					'resumeSync' => __('Resume Sync', 'synchy'),
 					'markManualBaseline' => __('Mark Manual Baseline Complete', 'synchy'),
 					'syncingAction' => __('Syncing...', 'synchy'),
+					'paused' => __('Paused', 'synchy'),
+					'resumeReady' => __('Resume ready', 'synchy'),
 					'success' => __('Success', 'synchy'),
 					'error' => __('Error', 'synchy'),
 					'noChanges' => __('No changes', 'synchy'),
@@ -8794,8 +9689,12 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'unknownError' => __('Synchy hit an unexpected Sync error.', 'synchy'),
 					'confirmSync' => __('Sync the previewed changes to the destination site now?', 'synchy'),
 					'confirmFullSync' => __('Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?', 'synchy'),
+					'confirmResumeSync' => __('Resume the remaining full Sync batches now?', 'synchy'),
 					'confirmBaseline' => __('Mark the selected scopes as already baselined after a successful manual full restore to the destination site?', 'synchy'),
 					'selectAtLeastOneScope' => __('Select at least one file or database scope first.', 'synchy'),
+					'batches' => __('Batches', 'synchy'),
+					'currentBatch' => __('Current batch', 'synchy'),
+					'pausePending' => __('Pause requested', 'synchy'),
 				],
 			]
 		);
