@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.47
+ * Version: 0.7.48
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.47';
+const SYNCHY_VERSION = '0.7.48';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -5400,17 +5400,37 @@ function synchy_get_sync_replacements(array $manifest): array
 {
 	$source = isset($manifest['source']) && is_array($manifest['source']) ? $manifest['source'] : [];
 	$target_home = untrailingslashit(home_url('/'));
+	$target_home_trailing = trailingslashit($target_home);
 	$target_site = untrailingslashit(site_url('/'));
+	$target_site_trailing = trailingslashit($target_site);
 	$target_abs = wp_normalize_path(ABSPATH);
 	$target_content = wp_normalize_path(WP_CONTENT_DIR);
 	$replacements = [];
 
-	$pairs = [
-		[(string) ($source['siteUrl'] ?? ''), $target_site],
-		[(string) ($source['homeUrl'] ?? ''), $target_home],
-		[(string) ($source['contentPath'] ?? ''), $target_content],
-		[(string) ($source['absPath'] ?? ''), $target_abs],
-	];
+	$append_pairs = static function (array &$pairs, string $search, string $replace, ?string $replace_trailing = null): void {
+		$search = trim($search);
+		$replace = trim($replace);
+
+		if ($search === '' || $replace === '') {
+			return;
+		}
+
+		$replace_trailing = $replace_trailing ?? trailingslashit($replace);
+		$pairs[] = [$search, str_ends_with($search, '/') ? $replace_trailing : $replace];
+
+		$trimmed_search = untrailingslashit($search);
+
+		if ($trimmed_search !== '') {
+			$pairs[] = [$trimmed_search, $replace];
+			$pairs[] = [trailingslashit($trimmed_search), $replace_trailing];
+		}
+	};
+
+	$pairs = [];
+	$append_pairs($pairs, (string) ($source['siteUrl'] ?? ''), $target_site, $target_site_trailing);
+	$append_pairs($pairs, (string) ($source['homeUrl'] ?? ''), $target_home, $target_home_trailing);
+	$append_pairs($pairs, (string) ($source['contentPath'] ?? ''), $target_content, trailingslashit($target_content));
+	$append_pairs($pairs, (string) ($source['absPath'] ?? ''), $target_abs, trailingslashit($target_abs));
 
 	foreach ((array) ($source['siteUrlAliases'] ?? []) as $alias) {
 		$alias = trim((string) $alias);
@@ -5419,7 +5439,7 @@ function synchy_get_sync_replacements(array $manifest): array
 			continue;
 		}
 
-		$pairs[] = [$alias, $target_site];
+		$append_pairs($pairs, $alias, $target_site, $target_site_trailing);
 	}
 
 	foreach ((array) ($source['homeUrlAliases'] ?? []) as $alias) {
@@ -5429,7 +5449,7 @@ function synchy_get_sync_replacements(array $manifest): array
 			continue;
 		}
 
-		$pairs[] = [$alias, $target_home];
+		$append_pairs($pairs, $alias, $target_home, $target_home_trailing);
 	}
 
 	foreach ($pairs as $pair) {
