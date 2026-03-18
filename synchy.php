@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.42
+ * Version: 0.7.43
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.42';
+const SYNCHY_VERSION = '0.7.43';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -4370,12 +4370,27 @@ function synchy_test_site_sync_connection(array $options)
 	return $response;
 }
 
+function synchy_get_remote_sync_status(array $options)
+{
+	$response = synchy_site_sync_remote_request($options, 'push/status', 'GET', ['timeout' => 20]);
+
+	if (is_wp_error($response)) {
+		return $response;
+	}
+
+	if (!is_array($response)) {
+		return new WP_Error('synchy_site_sync_invalid_status', __('The destination site returned an invalid Sync status payload.', 'synchy'));
+	}
+
+	return $response;
+}
+
 function synchy_get_sync_remote_route_url(array $options): string
 {
 	return trailingslashit((string) $options['destination_url']) . 'wp-json/syncy/v1/sync';
 }
 
-function synchy_sync_remote_request(array $options, string $zip_path)
+function synchy_sync_remote_request(array $options, int $expected_sync_time, string $zip_path)
 {
 	$validation = synchy_validate_site_sync_options($options);
 
@@ -4428,6 +4443,14 @@ function synchy_sync_remote_request(array $options, string $zip_path)
 	$data = json_decode($body, true);
 
 	if ($code < 200 || $code >= 300 || !is_array($data)) {
+		if (in_array($code, [502, 503, 504], true) && $expected_sync_time > 0) {
+			$recovered = synchy_wait_for_remote_sync_completion($options, $expected_sync_time, 150);
+
+			if (!is_wp_error($recovered)) {
+				return $recovered;
+			}
+		}
+
 		$message = is_array($data) && !empty($data['message'])
 			? (string) $data['message']
 			: sprintf(__('Destination site returned HTTP %d during Sync.', 'synchy'), $code);
@@ -4442,6 +4465,49 @@ function synchy_sync_remote_request(array $options, string $zip_path)
 	$message = isset($data['message']) ? (string) $data['message'] : __('The destination site rejected the Sync request.', 'synchy');
 
 	return new WP_Error('synchy_sync_remote_rejected', $message);
+}
+
+function synchy_wait_for_remote_sync_completion(array $options, int $expected_sync_time, int $timeout_seconds = 150)
+{
+	$deadline = time() + max(15, $timeout_seconds);
+	$last_error = null;
+
+	while (time() <= $deadline) {
+		$status = synchy_get_remote_sync_status($options);
+
+		if (!is_wp_error($status)) {
+			$remote_status = isset($status['status']) && is_array($status['status']) ? $status['status'] : [];
+			$last_sync_time = max(0, (int) ($remote_status['lastSyncTime'] ?? 0));
+			$state = (string) ($remote_status['status'] ?? '');
+
+			if ($state === 'success' && $last_sync_time >= $expected_sync_time) {
+				return [
+					'success' => true,
+					'mode' => (string) ($remote_status['mode'] ?? 'delta'),
+					'filesSynced' => (int) ($remote_status['filesSynced'] ?? 0),
+					'dbRowsSynced' => (int) ($remote_status['dbRowsSynced'] ?? 0),
+					'lastSyncTime' => $last_sync_time,
+					'message' => (string) ($remote_status['message'] ?? __('Destination site finished Sync after its HTTP response timed out.', 'synchy')),
+					'recoveredAfterHttpError' => true,
+				];
+			}
+
+			if ($state === 'error' && $last_sync_time >= $expected_sync_time) {
+				return new WP_Error(
+					'synchy_sync_remote_rejected',
+					(string) ($remote_status['message'] ?? __('The destination site reported a Sync error after its HTTP response timed out.', 'synchy'))
+				);
+			}
+		} else {
+			$last_error = $status;
+		}
+
+		sleep(5);
+	}
+
+	return $last_error instanceof WP_Error
+		? $last_error
+		: new WP_Error('synchy_sync_remote_status_timeout', __('The destination site did not confirm whether the timed-out Sync finished successfully.', 'synchy'));
 }
 
 function synchy_sync_apply_replacements($value, array $replacements, bool &$changed)
@@ -5101,7 +5167,11 @@ function synchy_run_sync_changes(array $raw_options)
 	$job['progress'] = 82;
 	$job['message'] = __('Waiting for the destination site to apply the incoming Sync package.', 'synchy');
 	synchy_update_sync_job($job);
-	$remote = synchy_sync_remote_request($options, (string) ($package['zip_path'] ?? ''));
+	$remote = synchy_sync_remote_request(
+		$options,
+		max(0, (int) ($summary['syncedAt'] ?? $package['manifest']['syncedAt'] ?? 0)),
+		(string) ($package['zip_path'] ?? '')
+	);
 
 	if ($temp_dir !== '' && is_dir($temp_dir)) {
 		synchy_rrmdir($temp_dir);
@@ -8378,6 +8448,22 @@ add_action('rest_api_init', function (): void {
 						'wordpressVersion' => get_bloginfo('version'),
 						'authenticatedAs' => $user instanceof WP_User ? (string) $user->user_login : '',
 						'receiverMode' => 'root_installer_package_upload',
+					]
+				);
+			},
+			'permission_callback' => $permission,
+		]
+	);
+
+	register_rest_route(
+		'synchy/v1',
+		'/push/status',
+		[
+			'methods' => 'GET',
+			'callback' => static function () {
+				return rest_ensure_response(
+					[
+						'status' => synchy_get_sync_status(),
 					]
 				);
 			},
