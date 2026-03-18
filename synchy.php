@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.39
+ * Version: 0.7.40
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.39';
+const SYNCHY_VERSION = '0.7.40';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -4768,6 +4768,14 @@ function synchy_clear_sync_caches(): void
 
 	if (function_exists('delete_expired_transients')) {
 		delete_expired_transients();
+	}
+
+	if (has_action('litespeed_purge_all')) {
+		do_action('litespeed_purge_all');
+	}
+
+	if (has_action('litespeed_purge_all_object')) {
+		do_action('litespeed_purge_all_object');
 	}
 }
 
