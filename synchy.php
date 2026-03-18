@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.44
+ * Version: 0.7.46
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.44';
+const SYNCHY_VERSION = '0.7.46';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -1865,6 +1865,8 @@ function synchy_should_sync_option_name(string $option_name): bool
 	}
 
 	$excluded = [
+		'home',
+		'siteurl',
 		'cron',
 		'recently_edited',
 		'uagb_asset_version',
@@ -2313,6 +2315,8 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 		'source' => [
 			'homeUrl' => home_url('/'),
 			'siteUrl' => site_url('/'),
+			'homeUrlAliases' => synchy_get_sync_source_url_aliases('home'),
+			'siteUrlAliases' => synchy_get_sync_source_url_aliases('siteurl'),
 			'absPath' => wp_normalize_path(ABSPATH),
 			'contentPath' => wp_normalize_path(WP_CONTENT_DIR),
 			'dbPrefix' => $wpdb->prefix,
@@ -2345,6 +2349,31 @@ function synchy_build_sync_manifest(array $file_delta, array $db_delta, int $syn
 			'tables' => $tables,
 		],
 	];
+}
+
+function synchy_get_sync_source_url_aliases(string $type): array
+{
+	$type = $type === 'siteurl' ? 'siteurl' : 'home';
+	$current = $type === 'siteurl' ? site_url('/') : home_url('/');
+	$stored = (string) get_option($type);
+	$aliases = [$current, $stored];
+
+	$normalized = [];
+
+	foreach ($aliases as $alias) {
+		$alias = trim((string) $alias);
+
+		if ($alias === '') {
+			continue;
+		}
+
+		$normalized[] = $alias;
+		$normalized[] = untrailingslashit($alias);
+	}
+
+	$normalized = array_values(array_unique(array_filter($normalized, static fn($value): bool => is_string($value) && $value !== '')));
+
+	return $normalized;
 }
 
 function synchy_get_sync_preview_selection(array $source): array
@@ -5376,6 +5405,26 @@ function synchy_get_sync_replacements(array $manifest): array
 		[(string) ($source['contentPath'] ?? ''), $target_content],
 		[(string) ($source['absPath'] ?? ''), $target_abs],
 	];
+
+	foreach ((array) ($source['siteUrlAliases'] ?? []) as $alias) {
+		$alias = trim((string) $alias);
+
+		if ($alias === '') {
+			continue;
+		}
+
+		$pairs[] = [$alias, $target_site];
+	}
+
+	foreach ((array) ($source['homeUrlAliases'] ?? []) as $alias) {
+		$alias = trim((string) $alias);
+
+		if ($alias === '') {
+			continue;
+		}
+
+		$pairs[] = [$alias, $target_home];
+	}
 
 	foreach ($pairs as $pair) {
 		$search = (string) $pair[0];
