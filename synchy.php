@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.37
+ * Version: 0.7.38
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.37';
+const SYNCHY_VERSION = '0.7.38';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -1582,7 +1582,7 @@ function synchy_is_sync_file_excluded(string $archive_path): bool
 	return false;
 }
 
-function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids): array
+function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids, bool $force_full = false): array
 {
 	$files = [];
 	$total_bytes = 0;
@@ -1593,7 +1593,7 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids)
 		$scope_id = (string) ($target['scope_id'] ?? '');
 		$scope_last_sync_time = max(0, (int) ($scope_sync_times[$scope_id] ?? 0));
 
-		if ($scope_last_sync_time <= 0 && $scope_id !== '') {
+		if (($force_full || $scope_last_sync_time <= 0) && $scope_id !== '') {
 			$baseline_scopes[$scope_id] = true;
 		}
 
@@ -1619,7 +1619,7 @@ function synchy_collect_sync_file_delta(array $state, array $selected_scope_ids)
 
 			$mtime = (int) $item->getMTime();
 
-			if ($scope_last_sync_time > 0 && $mtime <= $scope_last_sync_time) {
+			if (!$force_full && $scope_last_sync_time > 0 && $mtime <= $scope_last_sync_time) {
 				continue;
 			}
 
@@ -1877,7 +1877,7 @@ function synchy_get_sync_option_rows(): array
 	);
 }
 
-function synchy_build_sync_database_delta(array $state, array $selected_scope_ids): array
+function synchy_build_sync_database_delta(array $state, array $selected_scope_ids, bool $force_full = false): array
 {
 	global $wpdb;
 
@@ -1891,13 +1891,15 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 
 	if (in_array('db_content', $selected_scope_ids, true)) {
 		$content_last_sync = max(0, (int) ($scope_sync_times['db_content'] ?? 0));
-		$content_baseline = $content_last_sync <= 0;
+		$content_baseline = $force_full || $content_last_sync <= 0;
 
 		if ($content_baseline) {
 			$baseline_scopes[] = 'db_content';
 		}
 
-		$post_ids = synchy_get_changed_post_ids_for_sync($content_last_sync);
+		$post_ids = $content_baseline
+			? synchy_get_changed_post_ids_for_sync(0)
+			: synchy_get_changed_post_ids_for_sync($content_last_sync);
 		$posts_rows = synchy_fetch_rows_by_ids($wpdb->posts, 'ID', $post_ids);
 
 		if ($posts_rows !== []) {
@@ -1926,7 +1928,7 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 	}
 
 	if (in_array('db_options', $selected_scope_ids, true)) {
-		$options_baseline = max(0, (int) ($scope_sync_times['db_options'] ?? 0)) <= 0;
+		$options_baseline = $force_full || max(0, (int) ($scope_sync_times['db_options'] ?? 0)) <= 0;
 
 		if ($options_baseline) {
 			$baseline_scopes[] = 'db_options';
@@ -1953,7 +1955,7 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 	}
 
 	if (in_array('db_taxonomies', $selected_scope_ids, true)) {
-		$taxonomy_baseline = max(0, (int) ($scope_sync_times['db_taxonomies'] ?? 0)) <= 0;
+		$taxonomy_baseline = $force_full || max(0, (int) ($scope_sync_times['db_taxonomies'] ?? 0)) <= 0;
 
 		if ($taxonomy_baseline) {
 			$baseline_scopes[] = 'db_taxonomies';
@@ -2178,6 +2180,13 @@ function synchy_get_sync_preview_selection(array $source): array
 	];
 }
 
+function synchy_should_force_full_sync(array $source): bool
+{
+	$mode = sanitize_key((string) ($source['synchy_sync_run_mode'] ?? ''));
+
+	return $mode === 'full';
+}
+
 function synchy_filter_sync_file_delta_by_selection(array $file_delta, array $selection): array
 {
 	if (empty($selection['selection_present'])) {
@@ -2325,7 +2334,7 @@ function synchy_build_sync_preview_tree(array $file_delta, array $db_delta): arr
 	];
 }
 
-function synchy_build_sync_package(array $options, bool $preview_only = false, array $selection = [])
+function synchy_build_sync_package(array $options, bool $preview_only = false, array $selection = [], bool $force_full = false)
 {
 	$state = synchy_get_sync_state();
 	$selected_scope_ids = synchy_get_selected_sync_scope_ids($options);
@@ -2335,8 +2344,8 @@ function synchy_build_sync_package(array $options, bool $preview_only = false, a
 	}
 
 	$state['last_sync_time'] = synchy_get_sync_last_time();
-	$file_delta = synchy_collect_sync_file_delta($state, synchy_get_selected_sync_scope_ids($options, 'files'));
-	$db_delta = synchy_build_sync_database_delta($state, synchy_get_selected_sync_scope_ids($options, 'database'));
+	$file_delta = synchy_collect_sync_file_delta($state, synchy_get_selected_sync_scope_ids($options, 'files'), $force_full);
+	$db_delta = synchy_build_sync_database_delta($state, synchy_get_selected_sync_scope_ids($options, 'database'), $force_full);
 
 	if (!$preview_only && !empty($selection['selection_present'])) {
 		$file_delta = synchy_filter_sync_file_delta_by_selection($file_delta, $selection);
@@ -2381,6 +2390,7 @@ function synchy_build_sync_package(array $options, bool $preview_only = false, a
 		'pendingBaselineScopes' => $baseline_scope_ids,
 		'pendingBaselineLabels' => synchy_get_sync_scope_labels($baseline_scope_ids),
 		'previewTree' => synchy_build_sync_preview_tree($file_delta, $db_delta),
+		'forceFull' => $force_full,
 	];
 
 	if ($preview_only) {
@@ -4893,12 +4903,13 @@ function synchy_preview_sync_changes(array $raw_options)
 {
 	$options = synchy_sanitize_site_sync_options($raw_options);
 	$validation = synchy_validate_site_sync_options($options);
+	$force_full = synchy_should_force_full_sync($_POST);
 
 	if (is_wp_error($validation)) {
 		return $validation;
 	}
 
-	$preview = synchy_build_sync_package($options, true);
+	$preview = synchy_build_sync_package($options, true, [], $force_full);
 
 	if (is_wp_error($preview)) {
 		return $preview;
@@ -4914,6 +4925,7 @@ function synchy_run_sync_changes(array $raw_options)
 {
 	$options = synchy_sanitize_site_sync_options($raw_options);
 	$selection = synchy_get_sync_preview_selection($_POST);
+	$force_full = synchy_should_force_full_sync($_POST);
 	$validation = synchy_validate_site_sync_options($options);
 
 	if (is_wp_error($validation)) {
@@ -4928,7 +4940,7 @@ function synchy_run_sync_changes(array $raw_options)
 
 	$started = microtime(true);
 	$job = synchy_start_sync_job($options);
-	$package = synchy_build_sync_package($options, false, $selection);
+	$package = synchy_build_sync_package($options, false, $selection, $force_full);
 
 	if (is_wp_error($package)) {
 		synchy_mark_sync_job_error($job, $package->get_error_message());
@@ -7438,6 +7450,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 									<div class="synchy-input-row">
 										<button type="button" class="button" data-synchy-preview-sync><?php esc_html_e('Preview Changes', 'synchy'); ?></button>
 										<button type="button" class="button button-primary button-large" data-synchy-run-sync disabled><?php echo esc_html($run_button_label); ?></button>
+										<button type="button" class="button" data-synchy-run-full-sync disabled><?php esc_html_e('Full Sync', 'synchy'); ?></button>
 										<button
 											type="button"
 											class="button"
@@ -8553,6 +8566,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'previewError' => __('Preview failed', 'synchy'),
 					'startBaseline' => __('Start Baseline', 'synchy'),
 					'pushChanges' => __('Push Changes', 'synchy'),
+					'fullSync' => __('Full Sync', 'synchy'),
 					'markManualBaseline' => __('Mark Manual Baseline Complete', 'synchy'),
 					'syncingAction' => __('Syncing...', 'synchy'),
 					'success' => __('Success', 'synchy'),
@@ -8590,6 +8604,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'previewDefault' => __('Run Preview Changes to review changed files and database rows before syncing.', 'synchy'),
 					'unknownError' => __('Synchy hit an unexpected Sync error.', 'synchy'),
 					'confirmSync' => __('Sync the previewed changes to the destination site now?', 'synchy'),
+					'confirmFullSync' => __('Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?', 'synchy'),
 					'confirmBaseline' => __('Mark the selected scopes as already baselined after a successful manual full restore to the destination site?', 'synchy'),
 					'selectAtLeastOneScope' => __('Select at least one file or database scope first.', 'synchy'),
 				],

@@ -10,6 +10,7 @@
 	const testButton = document.querySelector("[data-synchy-test-sync]");
 	const previewButton = document.querySelector("[data-synchy-preview-sync]");
 	const runButton = document.querySelector("[data-synchy-run-sync]");
+	const fullSyncButton = document.querySelector("[data-synchy-run-full-sync]");
 	const manualBaselineButton = document.querySelector("[data-synchy-mark-baseline]");
 	const destinationUrlInput = document.querySelector("[data-synchy-sync-url]");
 	const usernameInput = document.querySelector("[data-synchy-sync-username]");
@@ -40,6 +41,7 @@
 		!testButton ||
 		!previewButton ||
 		!runButton ||
+		!fullSyncButton ||
 		!manualBaselineButton ||
 		!saveButton ||
 		!destinationUrlInput ||
@@ -54,6 +56,7 @@
 	}
 
 	let latestPreview = null;
+	let latestPreviewMode = "delta";
 	let busy = false;
 	let pendingBaselineScopeIds = new Set((config.scopeStatus?.pendingBaselineScopeIds || []).map(String));
 	let changedScopeIds = new Set();
@@ -293,6 +296,9 @@
 		getSelectedScopeIds().some((scopeId) => pendingBaselineScopeIds.has(String(scopeId)));
 
 	const getRunActionLabel = () =>
+		latestPreviewMode === "full" || Boolean(latestPreview?.forceFull)
+			? (config.strings.fullSync || "Full Sync")
+			:
 		getHasPendingBaselineSelection()
 			? (config.strings.startBaseline || "Start Baseline")
 			: (config.strings.pushChanges || "Push Changes");
@@ -400,10 +406,14 @@
 	const updateActionButtons = () => {
 		const hasSelection = getHasSelection();
 		const runLabel = getRunActionLabel();
+		const hasPreviewChanges = getHasPreviewChanges();
+		const hasSelectedPreviewItems = getHasSelectedPreviewItems();
 
 		previewButton.disabled = busy || !hasSelection;
-		runButton.disabled = busy || !hasSelection || !getHasPreviewChanges() || !getHasSelectedPreviewItems();
+		runButton.disabled = busy || !hasSelection || !hasPreviewChanges || !hasSelectedPreviewItems;
+		fullSyncButton.disabled = busy || !hasSelection;
 		runButton.textContent = busy ? (config.strings.syncingAction || "Syncing...") : runLabel;
+		fullSyncButton.textContent = config.strings.fullSync || "Full Sync";
 
 		if (manualBaselineButton) {
 			manualBaselineButton.disabled = busy || !hasSelection;
@@ -675,23 +685,29 @@
 
 	const clearPreview = () => {
 		latestPreview = null;
+		latestPreviewMode = "delta";
 		changedScopeIds = new Set();
 		renderPreview(null);
 		updateScopeRows();
 		updateActionButtons();
 	};
 
-	const collectFormData = (action) => {
+	const collectFormData = (action, extraFields = {}) => {
 		const formData = new FormData(form);
 		formData.append("action", action);
 		formData.append("nonce", config.nonce);
+
+		Object.entries(extraFields).forEach(([key, value]) => {
+			formData.append(key, value);
+		});
+
 		return formData;
 	};
 
-	const sendAjax = async (action) => {
+	const sendAjax = async (action, extraFields = {}) => {
 		const response = await fetch(config.ajaxUrl, {
 			method: "POST",
-			body: collectFormData(action),
+			body: collectFormData(action, extraFields),
 			credentials: "same-origin",
 		});
 
@@ -753,7 +769,7 @@
 		}
 	};
 
-	const runPreview = async () => {
+	const runPreview = async (mode = "delta") => {
 		if (!requireSelection()) {
 			updateActionButtons();
 			return;
@@ -773,8 +789,11 @@
 				}
 			}
 
-			const data = await sendAjax("synchy_preview_sync_changes");
+			const data = await sendAjax("synchy_preview_sync_changes", {
+				synchy_sync_run_mode: mode === "full" ? "full" : "delta",
+			});
 			latestPreview = data.preview || null;
+			latestPreviewMode = mode === "full" ? "full" : "delta";
 			applyScopeStatus(data.scopeStatus || null);
 			if (data.remoteSite) {
 				currentConnectionState = {
@@ -849,8 +868,11 @@
 		const scopeLabels = getSelectedScopeLabels();
 		const selectedFileSections = form.querySelectorAll('input[name="synchy_sync_selected_file_scopes[]"]:checked').length;
 		const selectedDbTables = form.querySelectorAll('input[name="synchy_sync_selected_db_tables[]"]:checked').length;
+		const isFullSync = latestPreviewMode === "full" || Boolean(latestPreview?.forceFull);
 		const confirmMessage = [
-			config.strings.confirmSync || "Sync the previewed changes to the destination site now?",
+			isFullSync
+				? (config.strings.confirmFullSync || "Run a full Sync for the selected scopes and send all tracked files and rows to the destination site now?")
+				: (config.strings.confirmSync || "Sync the previewed changes to the destination site now?"),
 			"",
 			`Destination: ${destinationUrl || "Not set"}`,
 			`Scopes: ${scopeLabels.join(", ") || "None"}`,
@@ -878,7 +900,9 @@
 		statusSummary.textContent = "Sync is running. Keep this tab open until it finishes.";
 
 		try {
-			const data = await sendAjax("synchy_run_sync_changes");
+			const data = await sendAjax("synchy_run_sync_changes", {
+				synchy_sync_run_mode: isFullSync ? "full" : "delta",
+			});
 			currentJob = data.job || null;
 			renderProgress(currentJob);
 			renderStatus(data.status || {});
@@ -939,7 +963,8 @@
 		updateActionButtons();
 	});
 	testButton.addEventListener("click", runTestConnection);
-	previewButton.addEventListener("click", runPreview);
+	previewButton.addEventListener("click", () => runPreview("delta"));
+	fullSyncButton.addEventListener("click", () => runPreview("full"));
 	runButton.addEventListener("click", runSync);
 	manualBaselineButton.addEventListener("click", runManualBaseline);
 
