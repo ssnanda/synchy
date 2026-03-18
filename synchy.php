@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.46
+ * Version: 0.7.47
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.46';
+const SYNCHY_VERSION = '0.7.47';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -1362,6 +1362,7 @@ function synchy_build_full_sync_job(array $options, array $payload)
 		'progress' => 1,
 		'message' => __('Preparing the full Sync batch plan.', 'synchy'),
 		'created_at' => gmdate('c'),
+		'started_at_unix' => microtime(true),
 		'destination_url' => (string) ($options['destination_url'] ?? ''),
 		'selected_scope_labels' => (array) (($payload['summary']['selectedScopeLabels'] ?? [])),
 		'selected_scope_ids' => (array) (($payload['summary']['selectedScopes'] ?? [])),
@@ -5235,14 +5236,19 @@ function synchy_finalize_full_sync_success(array $job, array $options, float $st
 	return $status;
 }
 
-function synchy_execute_full_sync_job(array $job, array $options, float $started_at)
+function synchy_process_full_sync_job(array $job, array $options)
 {
 	$batches = array_values(array_filter((array) ($job['batches'] ?? []), 'is_array'));
+	$started_at = (float) ($job['started_at_unix'] ?? microtime(true));
+
+	if (($job['status'] ?? '') !== 'running') {
+		return $job;
+	}
 
 	foreach ($batches as $index => $batch) {
 		$state = (string) ($job['batches'][$index]['status'] ?? 'pending');
 
-		if ($state === 'complete') {
+		if ($state === 'complete' || $state === 'running') {
 			continue;
 		}
 
@@ -5304,6 +5310,8 @@ function synchy_execute_full_sync_job(array $job, array $options, float $started
 			]);
 			return $job;
 		}
+
+		return $job;
 	}
 
 	return synchy_finalize_full_sync_success($job, $options, $started_at);
@@ -5343,9 +5351,7 @@ function synchy_resume_full_sync_job(array $options)
 	$job['phase'] = 'sending_package';
 	$job['pause_requested'] = false;
 	$job['message'] = __('Resuming the remaining full Sync batches.', 'synchy');
-	synchy_update_sync_job($job);
-
-	return synchy_execute_full_sync_job($job, $options, microtime(true));
+	return synchy_update_sync_job($job);
 }
 
 function synchy_sync_apply_replacements($value, array $replacements, bool &$changed)
@@ -5994,17 +6000,8 @@ function synchy_run_sync_changes(array $raw_options)
 
 		$job['sync_time_base'] = (int) (($payload['summary']['syncedAt'] ?? time()) * 100);
 		synchy_update_sync_job($job);
-		$result = synchy_execute_full_sync_job($job, $options, $started);
 
-		if (is_wp_error($result)) {
-			return $result;
-		}
-
-		if (is_array($result) && isset($result['status']) && synchy_is_resumable_sync_job_status((string) $result['status'])) {
-			return synchy_get_sync_status();
-		}
-
-		return is_array($result) ? $result : synchy_get_sync_status();
+		return synchy_get_sync_status();
 	}
 
 	$job = synchy_start_sync_job($options);
@@ -9154,8 +9151,21 @@ add_action('wp_ajax_synchy_get_sync_job_status', function (): void {
 
 	check_ajax_referer('synchy_sync_ajax', 'nonce');
 
+	$job = synchy_get_visible_sync_job();
+
+	if (($job['run_mode'] ?? '') === 'full' && ($job['status'] ?? '') === 'running') {
+		$options = synchy_get_site_sync_options();
+		$processed = synchy_process_full_sync_job($job, $options);
+
+		if (is_wp_error($processed)) {
+			wp_send_json_error(['message' => $processed->get_error_message()], 400);
+		}
+
+		$job = is_array($processed) ? $processed : synchy_get_visible_sync_job();
+	}
+
 	wp_send_json_success([
-		'job' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
+		'job' => synchy_build_sync_job_response($job),
 	]);
 });
 
