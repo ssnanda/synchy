@@ -62,7 +62,8 @@
 	let changedScopeIds = new Set();
 	let currentJob = config.currentJob || null;
 	let currentConnectionState = config.connectionState || null;
-	let connectionVerified = Boolean(currentConnectionState && currentConnectionState.status === "connected");
+	// Require a live connection test in the current page session before trusting the destination.
+	let connectionVerified = false;
 	const initialConnectionState = {
 		destinationUrl: destinationUrlInput.value.trim(),
 		username: usernameInput.value.trim(),
@@ -365,7 +366,7 @@
 
 	const hasConfirmedConnection = () =>
 		!getConnectionDirty()
-		&& (connectionVerified || currentConnectionState?.status === "connected");
+		&& connectionVerified;
 
 	const updateConnectionControls = () => {
 		const dirty = getConnectionDirty();
