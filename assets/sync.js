@@ -409,10 +409,11 @@
 		const runLabel = getRunActionLabel();
 		const hasPreviewChanges = getHasPreviewChanges();
 		const hasSelectedPreviewItems = getHasSelectedPreviewItems();
+		const hasFullSyncPreview = latestPreview !== null && (latestPreviewMode === "full" || Boolean(latestPreview?.forceFull));
 
 		previewButton.disabled = busy || !hasSelection;
 		runButton.disabled = busy || !hasSelection || !hasPreviewChanges || !hasSelectedPreviewItems;
-		fullSyncButton.disabled = busy || !hasSelection;
+		fullSyncButton.disabled = busy || !hasSelection || hasFullSyncPreview;
 		runButton.textContent = busy ? (config.strings.syncingAction || "Syncing...") : runLabel;
 		fullSyncButton.textContent = config.strings.fullSync || "Full Sync";
 
