@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.50
+ * Version: 0.7.51
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.50';
+const SYNCHY_VERSION = '0.7.51';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -1354,6 +1354,7 @@ function synchy_build_full_sync_job(array $options, array $payload)
 	return synchy_update_sync_job([
 		'job_id' => $job_id,
 		'sync_id' => (string) (($payload['summary']['syncId'] ?? '') ?: ('full-' . gmdate('YmdHis') . '-' . strtolower(wp_generate_password(6, false, false)))),
+		'worker_token' => wp_generate_password(32, false, false),
 		'run_mode' => 'full',
 		'status' => 'running',
 		'resumable' => true,
@@ -1639,6 +1640,99 @@ function synchy_build_sync_options_signature(array $options): string
 		'verify_ssl' => !empty($options['verify_ssl']) ? '1' : '0',
 		'selected_scopes' => array_values($selected_scope_ids),
 	], JSON_UNESCAPED_SLASHES));
+}
+
+function synchy_get_full_sync_worker_lock_timeout(): int
+{
+	return 120;
+}
+
+function synchy_is_full_sync_job_lock_stale(array $job): bool
+{
+	$acquired_at = (float) ($job['worker_lock_acquired_at'] ?? 0);
+
+	return $acquired_at > 0 && ((microtime(true) - $acquired_at) > synchy_get_full_sync_worker_lock_timeout());
+}
+
+function synchy_is_full_sync_job_locked(array $job): bool
+{
+	$lock_token = (string) ($job['worker_lock_token'] ?? '');
+
+	if ($lock_token === '') {
+		return false;
+	}
+
+	return !synchy_is_full_sync_job_lock_stale($job);
+}
+
+function synchy_acquire_full_sync_job_lock(array $job, string $lock_token)
+{
+	if (($job['run_mode'] ?? '') !== 'full') {
+		return new WP_Error('synchy_full_sync_not_found', __('There is no full Sync job available to lock.', 'synchy'));
+	}
+
+	if (synchy_is_full_sync_job_locked($job) && (string) ($job['worker_lock_token'] ?? '') !== $lock_token) {
+		return new WP_Error('synchy_full_sync_locked', __('Another Synchy worker is already processing this full Sync.', 'synchy'));
+	}
+
+	$job['worker_lock_token'] = $lock_token;
+	$job['worker_lock_acquired_at'] = microtime(true);
+	$job['worker_last_heartbeat'] = gmdate('c');
+
+	return synchy_update_sync_job($job);
+}
+
+function synchy_release_full_sync_job_lock(array $job, string $lock_token = ''): array
+{
+	if ($lock_token !== '' && (string) ($job['worker_lock_token'] ?? '') !== '' && (string) ($job['worker_lock_token'] ?? '') !== $lock_token) {
+		return $job;
+	}
+
+	unset($job['worker_lock_token'], $job['worker_lock_acquired_at']);
+	$job['worker_last_heartbeat'] = gmdate('c');
+
+	return synchy_update_sync_job($job);
+}
+
+function synchy_schedule_full_sync_worker(array $job, int $delay_seconds = 0): array
+{
+	$worker_token = (string) ($job['worker_token'] ?? '');
+
+	if (($job['run_mode'] ?? '') !== 'full' || $worker_token === '') {
+		return $job;
+	}
+
+	$timestamp = time() + max(0, $delay_seconds);
+	$job['next_run_at'] = gmdate('c', $timestamp);
+	$job = synchy_update_sync_job($job);
+
+	if (!wp_next_scheduled('synchy_run_full_sync_worker_event', [$worker_token])) {
+		wp_schedule_single_event($timestamp, 'synchy_run_full_sync_worker_event', [$worker_token]);
+	}
+
+	return $job;
+}
+
+function synchy_trigger_full_sync_worker_async(string $worker_token): void
+{
+	if ($worker_token === '') {
+		return;
+	}
+
+	$ajax_url = admin_url('admin-ajax.php');
+
+	wp_remote_post(
+		$ajax_url,
+		[
+			'timeout' => 1,
+			'blocking' => false,
+			'sslverify' => false,
+			'body' => [
+				'action' => 'synchy_run_full_sync_worker',
+				'token' => $worker_token,
+			],
+		]
+	);
 }
 
 function synchy_is_resumable_sync_job_status(string $status): bool
@@ -5552,7 +5646,78 @@ function synchy_resume_full_sync_job(array $options)
 	$job['phase'] = 'sending_package';
 	$job['pause_requested'] = false;
 	$job['message'] = __('Resuming the remaining full Sync batches.', 'synchy');
-	return synchy_update_sync_job($job);
+	$job = synchy_update_sync_job($job);
+	$job = synchy_schedule_full_sync_worker($job, 0);
+	synchy_trigger_full_sync_worker_async((string) ($job['worker_token'] ?? ''));
+
+	return $job;
+}
+
+function synchy_continue_full_sync_job(array $options)
+{
+	$job = synchy_get_sync_job();
+
+	if (($job['run_mode'] ?? '') !== 'full') {
+		return new WP_Error('synchy_full_sync_not_found', __('There is no full Sync job available to continue.', 'synchy'));
+	}
+
+	if (($job['status'] ?? '') !== 'running') {
+		return $job;
+	}
+
+	return synchy_process_full_sync_job($job, $options);
+}
+
+function synchy_run_full_sync_worker_by_token(string $worker_token)
+{
+	$worker_token = sanitize_text_field($worker_token);
+	$job = synchy_get_sync_job();
+
+	if ($worker_token === '' || ($job['run_mode'] ?? '') !== 'full' || (string) ($job['worker_token'] ?? '') !== $worker_token) {
+		return new WP_Error('synchy_full_sync_worker_missing', __('Synchy could not find the requested full Sync worker.', 'synchy'));
+	}
+
+	if (($job['status'] ?? '') !== 'running') {
+		return $job;
+	}
+
+	$lock_token = wp_generate_password(20, false, false);
+	$locked_job = synchy_acquire_full_sync_job_lock($job, $lock_token);
+
+	if (is_wp_error($locked_job)) {
+		if ($locked_job->get_error_code() === 'synchy_full_sync_locked') {
+			return $job;
+		}
+
+		return $locked_job;
+	}
+
+	$job = $locked_job;
+
+	try {
+		$options = synchy_get_site_sync_options();
+		$result = synchy_process_full_sync_job($job, $options);
+
+		if (is_wp_error($result)) {
+			return $result;
+		}
+
+		$job = is_array($result) ? $result : synchy_get_sync_job();
+		$job = synchy_release_full_sync_job_lock($job, $lock_token);
+
+		if (($job['run_mode'] ?? '') === 'full' && ($job['status'] ?? '') === 'running') {
+			$job = synchy_schedule_full_sync_worker($job, 1);
+			synchy_trigger_full_sync_worker_async((string) ($job['worker_token'] ?? ''));
+		}
+
+		return $job;
+	} finally {
+		$latest_job = synchy_get_sync_job();
+
+		if (($latest_job['run_mode'] ?? '') === 'full' && (string) ($latest_job['worker_lock_token'] ?? '') === $lock_token) {
+			synchy_release_full_sync_job_lock($latest_job, $lock_token);
+		}
+	}
 }
 
 function synchy_sync_apply_replacements($value, array $replacements, bool &$changed)
@@ -5632,6 +5797,8 @@ function synchy_get_sync_replacements(array $manifest): array
 	$append_pairs($pairs, (string) ($source['homeUrl'] ?? ''), $target_home, $target_home_trailing);
 	$append_pairs($pairs, (string) ($source['contentPath'] ?? ''), $target_content, trailingslashit($target_content));
 	$append_pairs($pairs, (string) ($source['absPath'] ?? ''), $target_abs, trailingslashit($target_abs));
+	$append_pairs($pairs, $target_site . 'wp-content/', $target_site_trailing . 'wp-content/', $target_site_trailing . 'wp-content/');
+	$append_pairs($pairs, $target_home . 'wp-content/', $target_home_trailing . 'wp-content/', $target_home_trailing . 'wp-content/');
 
 	foreach ((array) ($source['siteUrlAliases'] ?? []) as $alias) {
 		$alias = trim((string) $alias);
@@ -6220,7 +6387,9 @@ function synchy_run_sync_changes(array $raw_options)
 		}
 
 		$job['sync_time_base'] = (int) (($payload['summary']['syncedAt'] ?? time()) * 100);
-		synchy_update_sync_job($job);
+		$job = synchy_update_sync_job($job);
+		$job = synchy_schedule_full_sync_worker($job, 0);
+		synchy_trigger_full_sync_worker_async((string) ($job['worker_token'] ?? ''));
 
 		return synchy_get_sync_status();
 	}
@@ -9192,6 +9361,10 @@ add_action('wp_dashboard_setup', function (): void {
 	);
 });
 
+add_action('synchy_run_full_sync_worker_event', function (string $worker_token): void {
+	synchy_run_full_sync_worker_by_token($worker_token);
+}, 10, 1);
+
 add_action('admin_init', function (): void {
 	register_setting(
 		'synchy_export',
@@ -9406,22 +9579,52 @@ add_action('wp_ajax_synchy_get_sync_job_status', function (): void {
 
 	check_ajax_referer('synchy_sync_ajax', 'nonce');
 
-	$job = synchy_get_visible_sync_job();
+	wp_send_json_success([
+		'job' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
+	]);
+});
 
-	if (($job['run_mode'] ?? '') === 'full' && ($job['status'] ?? '') === 'running') {
-		$options = synchy_get_site_sync_options();
-		$processed = synchy_process_full_sync_job($job, $options);
+add_action('wp_ajax_synchy_continue_full_sync', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to continue a Synchy full Sync.', 'synchy')], 403);
+	}
 
-		if (is_wp_error($processed)) {
-			wp_send_json_error(['message' => $processed->get_error_message()], 400);
-		}
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
 
-		$job = is_array($processed) ? $processed : synchy_get_visible_sync_job();
+	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
+	$result = synchy_continue_full_sync_job($options);
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(['message' => $result->get_error_message()], 400);
 	}
 
 	wp_send_json_success([
-		'job' => synchy_build_sync_job_response($job),
+		'status' => synchy_get_sync_status(),
+		'job' => synchy_build_sync_job_response(synchy_get_sync_job()),
+		'scopeStatus' => synchy_get_sync_scope_status($options),
 	]);
+});
+
+add_action('wp_ajax_synchy_run_full_sync_worker', function (): void {
+	$token = isset($_POST['token']) ? sanitize_text_field(wp_unslash((string) $_POST['token'])) : '';
+	$result = synchy_run_full_sync_worker_by_token($token);
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(['message' => $result->get_error_message()], 400);
+	}
+
+	wp_send_json_success(['job' => synchy_build_sync_job_response(is_array($result) ? $result : synchy_get_sync_job())]);
+});
+
+add_action('wp_ajax_nopriv_synchy_run_full_sync_worker', function (): void {
+	$token = isset($_POST['token']) ? sanitize_text_field(wp_unslash((string) $_POST['token'])) : '';
+	$result = synchy_run_full_sync_worker_by_token($token);
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(['message' => $result->get_error_message()], 400);
+	}
+
+	wp_send_json_success(['job' => synchy_build_sync_job_response(is_array($result) ? $result : synchy_get_sync_job())]);
 });
 
 add_action('wp_ajax_synchy_pause_full_sync', function (): void {
