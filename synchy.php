@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.56
+ * Version: 0.7.57
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.56';
+const SYNCHY_VERSION = '0.7.57';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -704,6 +704,13 @@ function synchy_get_sync_scope_definitions(): array
 			'label' => __('Terms & Taxonomies', 'synchy'),
 			'description' => __('Terms, taxonomies, and term relationships.', 'synchy'),
 		],
+		'db_wp_formy' => [
+			'option_key' => 'sync_scope_db_wp_formy',
+			'type' => 'db',
+			'group' => 'database',
+			'label' => __('WP Formy', 'synchy'),
+			'description' => __('WP Formy forms, entries, and entry notes stored in custom database tables.', 'synchy'),
+		],
 	];
 }
 
@@ -796,6 +803,10 @@ function synchy_get_sync_scope_tracked_items(string $scope_id): array
 			$wpdb->term_taxonomy,
 			$wpdb->term_relationships,
 		],
+		'db_wp_formy' => array_map(
+			static fn(string $table): string => $table,
+			synchy_get_wp_formy_sync_tables()
+		),
 		default => [],
 	};
 }
@@ -1399,6 +1410,15 @@ function synchy_build_sync_manual_baseline_fingerprints(array $selected_scope_id
 
 	if (in_array('db_taxonomies', $selected_scope_ids, true)) {
 		foreach ([$wpdb->terms, $wpdb->term_taxonomy, $wpdb->term_relationships] as $table) {
+			$fingerprints[$table] = synchy_build_sync_table_fingerprints(
+				synchy_fetch_all_rows_from_table($table),
+				(array) ($specs[$table]['key_columns'] ?? [])
+			);
+		}
+	}
+
+	if (in_array('db_wp_formy', $selected_scope_ids, true)) {
+		foreach (synchy_get_wp_formy_sync_tables() as $table) {
 			$fingerprints[$table] = synchy_build_sync_table_fingerprints(
 				synchy_fetch_all_rows_from_table($table),
 				(array) ($specs[$table]['key_columns'] ?? [])
@@ -2064,6 +2084,15 @@ function synchy_get_sync_table_specs(): array
 			'key_columns' => ['object_id', 'term_taxonomy_id'],
 			'update_columns' => ['term_order'],
 		],
+		$wpdb->prefix . 'formy_forms' => [
+			'key_columns' => ['id'],
+		],
+		$wpdb->prefix . 'formy_leads' => [
+			'key_columns' => ['id'],
+		],
+		$wpdb->prefix . 'formy_lead_notes' => [
+			'key_columns' => ['id'],
+		],
 	];
 }
 
@@ -2129,6 +2158,31 @@ function synchy_get_changed_post_ids_for_sync(int $last_sync_time): array
 	$rows = $wpdb->get_col($sql);
 
 	return is_array($rows) ? array_values(array_map('intval', $rows)) : [];
+}
+
+function synchy_get_wp_formy_sync_tables(): array
+{
+	global $wpdb;
+
+	$candidates = [
+		$wpdb->prefix . 'formy_forms',
+		$wpdb->prefix . 'formy_leads',
+		$wpdb->prefix . 'formy_lead_notes',
+	];
+
+	$tables = [];
+
+	foreach ($candidates as $table) {
+		$table_exists = $wpdb->get_var(
+			$wpdb->prepare('SHOW TABLES LIKE %s', $table)
+		);
+
+		if ($table_exists === $table) {
+			$tables[] = $table;
+		}
+	}
+
+	return $tables;
 }
 
 function synchy_build_sync_snapshot_delta(array $rows, array $previous_fingerprints, array $key_columns, bool $baseline): array
@@ -2276,6 +2330,42 @@ function synchy_build_sync_database_delta(array $state, array $selected_scope_id
 
 			$tables[$table] = [
 				'scope_id' => 'db_taxonomies',
+				'key_columns' => $specs[$table]['key_columns'],
+				'rows' => $delta['rows'],
+				'row_ids' => $delta['row_ids'],
+				'update_columns' => $specs[$table]['update_columns'] ?? [],
+			];
+			$total_rows += count($delta['rows']);
+		}
+	}
+
+	if (in_array('db_wp_formy', $selected_scope_ids, true)) {
+		$wp_formy_baseline = $force_full || max(0, (int) ($scope_sync_times['db_wp_formy'] ?? 0)) <= 0;
+
+		if ($wp_formy_baseline) {
+			$baseline_scopes[] = 'db_wp_formy';
+		}
+
+		foreach (synchy_get_wp_formy_sync_tables() as $table) {
+			if (!isset($specs[$table])) {
+				continue;
+			}
+
+			$delta = synchy_build_sync_snapshot_delta(
+				synchy_fetch_all_rows_from_table($table),
+				isset($previous_fingerprints[$table]) && is_array($previous_fingerprints[$table]) ? $previous_fingerprints[$table] : [],
+				$specs[$table]['key_columns'],
+				$wp_formy_baseline
+			);
+
+			$current_fingerprints[$table] = $delta['fingerprints'];
+
+			if ($delta['rows'] === []) {
+				continue;
+			}
+
+			$tables[$table] = [
+				'scope_id' => 'db_wp_formy',
 				'key_columns' => $specs[$table]['key_columns'],
 				'rows' => $delta['rows'],
 				'row_ids' => $delta['row_ids'],
@@ -3007,6 +3097,7 @@ function synchy_build_full_sync_batches(array $file_delta, array $db_delta): arr
 		'db_content' => 'Database / Posts & Post Meta',
 		'db_options' => 'Database / Options',
 		'db_taxonomies' => 'Database / Terms & Taxonomies',
+		'db_wp_formy' => 'Database / WP Formy',
 	];
 	$db_scope_tables = [];
 
