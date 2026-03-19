@@ -30,6 +30,8 @@
 	const connectionBadge = document.querySelector("[data-synchy-sync-connection-badge]");
 	const connectionMessage = document.querySelector("[data-synchy-sync-connection-message]");
 	const connectionMeta = document.querySelector("[data-synchy-sync-connection-meta]");
+	const updateRemoteButton = document.querySelector("[data-synchy-update-remote-synchy]");
+	const updateRemoteNote = document.querySelector("[data-synchy-update-remote-note]");
 	const previewBadge = document.querySelector("[data-synchy-sync-preview-badge]");
 	const previewMessage = document.querySelector("[data-synchy-sync-preview-message]");
 	const previewTreeContainer = document.querySelector("[data-synchy-sync-preview-tree]");
@@ -66,6 +68,7 @@
 	let changedScopeIds = new Set();
 	let currentJob = config.currentJob || null;
 	let currentConnectionState = config.connectionState || null;
+	let autoConnectionCheckStarted = false;
 	// Require a live connection test in the current page session before trusting the destination.
 	let connectionVerified = false;
 	const initialConnectionState = {
@@ -140,6 +143,31 @@
 		}
 
 		return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+	};
+
+	const compareVersions = (left, right) => {
+		const normalize = (value) =>
+			String(value || "")
+				.replace(/^[^0-9]*/, "")
+				.split(".")
+				.map((part) => Number.parseInt(part, 10) || 0);
+
+		const leftParts = normalize(left);
+		const rightParts = normalize(right);
+		const length = Math.max(leftParts.length, rightParts.length);
+
+		for (let index = 0; index < length; index += 1) {
+			const leftPart = leftParts[index] || 0;
+			const rightPart = rightParts[index] || 0;
+
+			if (leftPart === rightPart) {
+				continue;
+			}
+
+			return leftPart > rightPart ? 1 : -1;
+		}
+
+		return 0;
 	};
 
 	const renderMeta = (container, items) => {
@@ -447,6 +475,7 @@
 	const setBusy = (isBusy) => {
 		busy = isBusy;
 		updateConnectionControls();
+		updateRemoteUpdateControls();
 		updateActionButtons();
 	};
 
@@ -479,9 +508,29 @@
 		renderMeta(connectionMeta, [
 			{ label: config.strings.site || "Site", value: payload.name || "" },
 			{ label: config.strings.destination || "Destination", value: payload.siteUrl || "" },
+			{ label: config.strings.localPluginVersion || "Local plugin version", value: config.localPluginVersion || "" },
 			{ label: config.strings.pluginVersion || "Plugin version", value: payload.pluginVersion || "" },
 			{ label: config.strings.authenticatedAs || "Authenticated as", value: payload.authenticatedAs || "" },
 		]);
+	};
+
+	const updateRemoteUpdateControls = () => {
+		if (!updateRemoteButton || !updateRemoteNote) {
+			return;
+		}
+
+		const remoteVersion = String(currentConnectionState?.remoteSite?.pluginVersion || "");
+		const localVersion = String(config.localPluginVersion || "");
+		const canCompare = remoteVersion !== "" && localVersion !== "";
+		const remoteIsOlder = canCompare && compareVersions(remoteVersion, localVersion) < 0;
+
+		updateRemoteButton.classList.toggle("is-hidden", !remoteIsOlder);
+		updateRemoteButton.disabled = busy || !remoteIsOlder;
+		updateRemoteNote.textContent = remoteIsOlder
+			? `${config.strings.updateAvailable || "Destination update available"} ${remoteVersion} -> ${localVersion}`
+			: (canCompare
+				? (config.strings.destinationUpToDate || "Destination Synchy is up to date.")
+				: (config.strings.updateCheckPending || "Run or wait for the connection check to compare Synchy versions."));
 	};
 
 	const performConnectionTest = async () => {
@@ -495,6 +544,7 @@
 			connectionVerified = true;
 			renderConnectionResult(data.remoteSite || {}, false);
 			updateConnectionControls();
+			updateRemoteUpdateControls();
 			return { ok: true, remoteSite: data.remoteSite || {} };
 		} catch (error) {
 			currentConnectionState = {
@@ -505,7 +555,37 @@
 			connectionVerified = false;
 			renderConnectionResult({ message: error.message }, true);
 			updateConnectionControls();
+			updateRemoteUpdateControls();
 			return { ok: false, message: error.message };
+		}
+	};
+
+	const updateRemoteSynchy = async () => {
+		if (!window.confirm(config.strings.confirmUpdateRemoteSynchy || "Update Synchy on the destination site from this local plugin copy now?")) {
+			return;
+		}
+
+		setBusy(true);
+
+		try {
+			const data = await sendAjax("synchy_update_remote_synchy");
+
+			if (data.remoteSite) {
+				currentConnectionState = {
+					status: "connected",
+					message: data.message || config.strings.destinationUpdated || "Destination Synchy updated.",
+					remoteSite: data.remoteSite,
+				};
+				connectionVerified = true;
+				renderConnectionResult(data.remoteSite, false);
+				updateConnectionControls();
+				updateRemoteUpdateControls();
+			}
+		} catch (error) {
+			renderConnectionResult({ message: error.message }, true);
+			updateRemoteUpdateControls();
+		} finally {
+			setBusy(false);
 		}
 	};
 
@@ -1097,6 +1177,9 @@
 		updateActionButtons();
 	});
 	testButton.addEventListener("click", runTestConnection);
+	if (updateRemoteButton) {
+		updateRemoteButton.addEventListener("click", updateRemoteSynchy);
+	}
 	previewButton.addEventListener("click", () => runPreview("delta"));
 	fullSyncButton.addEventListener("click", () => runPreview("full"));
 	runButton.addEventListener("click", runSync);
@@ -1108,10 +1191,21 @@
 	updateScopeRows();
 	renderProgress(currentJob);
 	renderPreviewTree(latestPreview);
+	updateRemoteUpdateControls();
 	if (currentConnectionState?.status === "connected") {
 		renderConnectionResult(currentConnectionState.remoteSite || {}, false);
 	} else if (currentConnectionState?.status === "error") {
 		renderConnectionResult({ message: currentConnectionState.message || (config.strings.connectionError || "Connection failed") }, true);
+	}
+
+	if (
+		!autoConnectionCheckStarted
+		&& destinationUrlInput.value.trim() !== ""
+		&& usernameInput.value.trim() !== ""
+		&& passwordInput.dataset.hasSavedPassword === "1"
+	) {
+		autoConnectionCheckStarted = true;
+		window.setTimeout(runTestConnection, 50);
 	}
 
 	if (currentJob && currentJob.status === "running") {

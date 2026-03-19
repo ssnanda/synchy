@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.48
+ * Version: 0.7.50
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.48';
+const SYNCHY_VERSION = '0.7.50';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -4935,6 +4935,207 @@ function synchy_test_site_sync_connection(array $options)
 	return $response;
 }
 
+function synchy_build_self_update_package()
+{
+	if (!class_exists('ZipArchive')) {
+		return new WP_Error('synchy_missing_zip', __('ZipArchive is not available on this server.', 'synchy'));
+	}
+
+	$temp_dir = synchy_prepare_sync_temp_dir('plugin-self-update');
+
+	if (is_wp_error($temp_dir)) {
+		return $temp_dir;
+	}
+
+	$plugin_dir = wp_normalize_path(plugin_dir_path(__FILE__));
+	$zip_path = wp_normalize_path(trailingslashit($temp_dir) . 'synchy.zip');
+	$zip = new ZipArchive();
+	$result = $zip->open($zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+
+	if ($result !== true) {
+		synchy_rrmdir($temp_dir);
+		return new WP_Error('synchy_self_update_zip_open_failed', __('Synchy could not create the remote plugin update package.', 'synchy'));
+	}
+
+	$iterator = new RecursiveIteratorIterator(
+		new RecursiveDirectoryIterator($plugin_dir, FilesystemIterator::SKIP_DOTS),
+		RecursiveIteratorIterator::SELF_FIRST
+	);
+
+	foreach ($iterator as $item) {
+		if (!$item instanceof SplFileInfo || !$item->isFile()) {
+			continue;
+		}
+
+		$absolute_path = wp_normalize_path($item->getPathname());
+		$relative_path = ltrim(str_replace($plugin_dir, '', $absolute_path), '/');
+
+		if ($relative_path === '' || str_starts_with($relative_path, '.git/')) {
+			continue;
+		}
+
+		if (!$zip->addFile($absolute_path, 'synchy/' . $relative_path)) {
+			$zip->close();
+			synchy_rrmdir($temp_dir);
+			return new WP_Error(
+				'synchy_self_update_zip_add_failed',
+				sprintf(
+					/* translators: %s: plugin file path */
+					__('Synchy could not add %s to the remote plugin update package.', 'synchy'),
+					$relative_path
+				)
+			);
+		}
+	}
+
+	$zip->close();
+
+	return [
+		'zip_path' => $zip_path,
+		'temp_dir' => $temp_dir,
+		'filename' => 'synchy.zip',
+	];
+}
+
+function synchy_copy_directory_contents(string $source_dir, string $destination_dir)
+{
+	$source_dir = wp_normalize_path($source_dir);
+	$destination_dir = wp_normalize_path($destination_dir);
+
+	if (!is_dir($source_dir)) {
+		return new WP_Error('synchy_copy_source_missing', __('Synchy could not find the extracted plugin files to install.', 'synchy'));
+	}
+
+	if (!wp_mkdir_p($destination_dir)) {
+		return new WP_Error('synchy_copy_destination_missing', __('Synchy could not prepare the destination plugin folder.', 'synchy'));
+	}
+
+	$iterator = new RecursiveIteratorIterator(
+		new RecursiveDirectoryIterator($source_dir, FilesystemIterator::SKIP_DOTS),
+		RecursiveIteratorIterator::SELF_FIRST
+	);
+
+	foreach ($iterator as $item) {
+		if (!$item instanceof SplFileInfo) {
+			continue;
+		}
+
+		$source_path = wp_normalize_path($item->getPathname());
+		$relative_path = ltrim(str_replace($source_dir, '', $source_path), '/');
+		$destination_path = wp_normalize_path(trailingslashit($destination_dir) . $relative_path);
+
+		if ($item->isDir()) {
+			if (!wp_mkdir_p($destination_path)) {
+				return new WP_Error(
+					'synchy_copy_destination_dir_failed',
+					sprintf(
+						/* translators: %s: directory path */
+						__('Synchy could not prepare the plugin folder %s on the destination site.', 'synchy'),
+						$relative_path
+					)
+				);
+			}
+
+			continue;
+		}
+
+		if (!wp_mkdir_p(dirname($destination_path))) {
+			return new WP_Error('synchy_copy_destination_parent_failed', __('Synchy could not prepare the destination plugin parent folder.', 'synchy'));
+		}
+
+		if (@copy($source_path, $destination_path) === false) {
+			return new WP_Error(
+				'synchy_copy_destination_file_failed',
+				sprintf(
+					/* translators: %s: file path */
+					__('Synchy could not install the Synchy file %s on the destination site.', 'synchy'),
+					$relative_path
+				)
+			);
+		}
+	}
+
+	return true;
+}
+
+function synchy_apply_self_update_package(string $zip_path)
+{
+	if (!function_exists('unzip_file')) {
+		require_once ABSPATH . 'wp-admin/includes/file.php';
+	}
+
+	if (!function_exists('unzip_file')) {
+		return new WP_Error('synchy_self_update_unzip_missing', __('WordPress unzip support is not available on the destination site.', 'synchy'));
+	}
+
+	$temp_dir = synchy_prepare_sync_temp_dir('plugin-self-update-receive');
+
+	if (is_wp_error($temp_dir)) {
+		return $temp_dir;
+	}
+
+	try {
+		$unzipped = unzip_file($zip_path, $temp_dir);
+
+		if (is_wp_error($unzipped)) {
+			return $unzipped;
+		}
+
+		$source_dir = wp_normalize_path(trailingslashit($temp_dir) . 'synchy');
+		$destination_dir = wp_normalize_path(plugin_dir_path(__FILE__));
+		$copied = synchy_copy_directory_contents($source_dir, $destination_dir);
+
+		if (is_wp_error($copied)) {
+			return $copied;
+		}
+
+		return [
+			'pluginVersion' => SYNCHY_VERSION,
+			'pluginDirectory' => $destination_dir,
+		];
+	} finally {
+		if (is_dir($temp_dir)) {
+			synchy_rrmdir($temp_dir);
+		}
+	}
+}
+
+function synchy_update_remote_synchy(array $options)
+{
+	$package = synchy_build_self_update_package();
+
+	if (is_wp_error($package)) {
+		return $package;
+	}
+
+	try {
+		$response = synchy_site_sync_remote_request(
+			$options,
+			'plugin/update-self',
+			'POST',
+			[
+				'timeout' => 120,
+				'headers' => [
+					'Content-Type' => 'application/zip',
+					'X-Synchy-Filename' => (string) ($package['filename'] ?? 'synchy.zip'),
+				],
+				'body' => file_get_contents((string) $package['zip_path']),
+				'data_format' => 'body',
+			]
+		);
+
+		if (is_wp_error($response)) {
+			return $response;
+		}
+
+		return $response;
+	} finally {
+		if (!empty($package['temp_dir']) && is_dir((string) $package['temp_dir'])) {
+			synchy_rrmdir((string) $package['temp_dir']);
+		}
+	}
+}
+
 function synchy_get_remote_sync_status(array $options)
 {
 	$response = synchy_site_sync_remote_request($options, 'push/status', 'GET', ['timeout' => 20]);
@@ -8630,6 +8831,10 @@ function synchy_render_incremental_site_sync_page(array $current): void
 											<strong><?php echo esc_html((string) ($connection_remote_site['siteUrl'] ?? '')); ?></strong>
 										</div>
 										<div>
+											<span class="synchy-export-meta__label"><?php esc_html_e('Local plugin version', 'synchy'); ?></span>
+											<strong><?php echo esc_html(SYNCHY_VERSION); ?></strong>
+										</div>
+										<div>
 											<span class="synchy-export-meta__label"><?php esc_html_e('Plugin version', 'synchy'); ?></span>
 											<strong><?php echo esc_html((string) ($connection_remote_site['pluginVersion'] ?? '')); ?></strong>
 										</div>
@@ -8638,6 +8843,10 @@ function synchy_render_incremental_site_sync_page(array $current): void
 											<strong><?php echo esc_html((string) ($connection_remote_site['authenticatedAs'] ?? '')); ?></strong>
 										</div>
 									<?php endif; ?>
+								</div>
+								<div class="synchy-stack synchy-stack--compact">
+									<button type="button" class="button is-hidden" data-synchy-update-remote-synchy><?php esc_html_e('Update Live Synchy', 'synchy'); ?></button>
+									<p class="synchy-field-note" data-synchy-update-remote-note><?php esc_html_e('Run or wait for the connection check to compare Synchy versions.', 'synchy'); ?></p>
 								</div>
 							</div>
 						</div>
@@ -9144,6 +9353,32 @@ add_action('wp_ajax_synchy_test_sync_connection', function (): void {
 	wp_send_json_success(['remoteSite' => $result]);
 });
 
+add_action('wp_ajax_synchy_update_remote_synchy', function (): void {
+	if (!current_user_can('manage_options')) {
+		wp_send_json_error(['message' => __('You are not allowed to update Synchy on the destination site.', 'synchy')], 403);
+	}
+
+	check_ajax_referer('synchy_sync_ajax', 'nonce');
+
+	$options = isset($_POST[SYNCHY_SITE_SYNC_OPTIONS]) ? synchy_sanitize_site_sync_options(wp_unslash($_POST[SYNCHY_SITE_SYNC_OPTIONS])) : synchy_get_site_sync_options();
+	$result = synchy_update_remote_synchy($options);
+
+	if (is_wp_error($result)) {
+		wp_send_json_error(['message' => $result->get_error_message()], 400);
+	}
+
+	$remote_site = synchy_test_site_sync_connection($options);
+
+	if (!is_wp_error($remote_site)) {
+		synchy_store_sync_connection_success($options, $remote_site);
+	}
+
+	wp_send_json_success([
+		'message' => (string) ($result['message'] ?? __('Synchy updated the destination plugin successfully.', 'synchy')),
+		'remoteSite' => is_wp_error($remote_site) ? [] : $remote_site,
+	]);
+});
+
 add_action('wp_ajax_synchy_mark_sync_baseline_complete', function (): void {
 	if (!current_user_can('manage_options')) {
 		wp_send_json_error(['message' => __('You are not allowed to mark a Synchy Sync baseline.', 'synchy')], 403);
@@ -9443,6 +9678,58 @@ add_action('rest_api_init', function (): void {
 
 	register_rest_route(
 		'synchy/v1',
+		'/plugin/update-self',
+		[
+			'methods' => 'POST',
+			'callback' => static function (WP_REST_Request $request) {
+				$body = $request->get_body();
+
+				if ($body === '') {
+					return new WP_Error('synchy_self_update_empty', __('Synchy received an empty destination plugin update package.', 'synchy'), ['status' => 400]);
+				}
+
+				$temp_dir = synchy_prepare_sync_temp_dir('plugin-self-update-upload');
+
+				if (is_wp_error($temp_dir)) {
+					return $temp_dir;
+				}
+
+				try {
+					$filename = sanitize_file_name((string) $request->get_header('X-Synchy-Filename'));
+
+					if ($filename === '') {
+						$filename = 'synchy.zip';
+					}
+
+					$zip_path = wp_normalize_path(trailingslashit($temp_dir) . $filename);
+
+					if (file_put_contents($zip_path, $body) === false) {
+						return new WP_Error('synchy_self_update_write_failed', __('Synchy could not save the destination plugin update package.', 'synchy'), ['status' => 500]);
+					}
+
+					$result = synchy_apply_self_update_package($zip_path);
+
+					if (is_wp_error($result)) {
+						return $result;
+					}
+
+					return rest_ensure_response([
+						'success' => true,
+						'message' => __('Synchy updated the destination plugin files successfully.', 'synchy'),
+						'pluginVersion' => SYNCHY_VERSION,
+					]);
+				} finally {
+					if (is_dir($temp_dir)) {
+						synchy_rrmdir($temp_dir);
+					}
+				}
+			},
+			'permission_callback' => $permission,
+		]
+	);
+
+	register_rest_route(
+		'synchy/v1',
 		'/push/session',
 		[
 			'methods' => 'POST',
@@ -9709,6 +9996,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 			[
 				'ajaxUrl' => admin_url('admin-ajax.php'),
 				'nonce' => wp_create_nonce('synchy_sync_ajax'),
+				'localPluginVersion' => SYNCHY_VERSION,
 				'currentJob' => synchy_build_sync_job_response(synchy_get_visible_sync_job()),
 				'connectionState' => synchy_get_current_sync_connection_state(synchy_get_site_sync_options()),
 				'defaultStages' => synchy_get_sync_stage_items([]),
@@ -9741,6 +10029,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'lastRun' => __('Last run', 'synchy'),
 					'lastSync' => __('Last successful Sync', 'synchy'),
 					'destination' => __('Destination', 'synchy'),
+					'localPluginVersion' => __('Local plugin version', 'synchy'),
 					'files' => __('Files', 'synchy'),
 					'dbRows' => __('DB rows', 'synchy'),
 					'duration' => __('Duration', 'synchy'),
@@ -9774,6 +10063,11 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'batches' => __('Batches', 'synchy'),
 					'currentBatch' => __('Current batch', 'synchy'),
 					'pausePending' => __('Pause requested', 'synchy'),
+					'updateAvailable' => __('Destination update available:', 'synchy'),
+					'destinationUpToDate' => __('Destination Synchy is up to date.', 'synchy'),
+					'updateCheckPending' => __('Run or wait for the connection check to compare Synchy versions.', 'synchy'),
+					'confirmUpdateRemoteSynchy' => __('Update Synchy on the destination site from this local plugin copy now?', 'synchy'),
+					'destinationUpdated' => __('Destination Synchy updated.', 'synchy'),
 				],
 			]
 		);
