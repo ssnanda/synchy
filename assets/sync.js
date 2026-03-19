@@ -200,12 +200,8 @@
 		const batches = Array.isArray(currentJob?.batches) && currentJob.batches.length > 0
 			? currentJob.batches
 			: Array.isArray(preview?.batches) ? preview.batches : [];
-		const totalBatches = Number(
-			currentJob?.totalBatches
-			|| preview?.totalBatches
-			|| batches.length
-			|| 0
-		);
+		const totalBatchesSource = currentJob?.totalBatches ?? preview?.totalBatches ?? batches.length ?? 0;
+		const totalBatches = Number(totalBatchesSource);
 
 		if (totalBatches <= 0) {
 			previewBatchCounter.textContent = "";
@@ -213,11 +209,8 @@
 			return;
 		}
 
-		const completedBatches = Number(
-			currentJob?.completedBatches
-			|| batches.filter((batch) => String(batch?.status || "") === "complete").length
-			|| 0
-		);
+		const completedBatchesSource = currentJob?.completedBatches ?? batches.filter((batch) => String(batch?.status || "") === "complete").length ?? 0;
+		const completedBatches = Number(completedBatchesSource);
 
 		previewBatchCounter.textContent = `${completedBatches.toLocaleString()} / ${totalBatches.toLocaleString()} ${config.strings.batchesComplete || "batches complete"}`;
 		previewBatchCounter.classList.remove("is-hidden");
@@ -331,6 +324,7 @@
 			}
 		}
 
+		renderPreviewBatchCounter(latestPreview);
 		renderStages(job);
 	};
 
@@ -618,7 +612,12 @@
 			renderConnectionResult({ message: error.message }, true);
 			updateRemoteUpdateControls();
 		} finally {
-			setBusy(false);
+			if (currentJob?.status === "running") {
+				setBusy(true);
+				window.setTimeout(pollSyncJob, 100);
+			} else {
+				setBusy(false);
+			}
 		}
 	};
 
