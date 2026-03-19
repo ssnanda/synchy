@@ -607,6 +607,9 @@
 				renderConnectionResult(data.remoteSite, false);
 				updateConnectionControls();
 				updateRemoteUpdateControls();
+				window.setTimeout(() => {
+					performConnectionTest().catch(() => {});
+				}, 1500);
 			}
 		} catch (error) {
 			renderConnectionResult({ message: error.message }, true);
