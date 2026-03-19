@@ -172,6 +172,36 @@
 		return 0;
 	};
 
+	const refreshRemoteVersionUntilCurrent = (attempt = 0) => {
+		const maxAttempts = 6;
+		const localVersion = String(config.localPluginVersion || "");
+		const remoteVersion = String(currentConnectionState?.remoteSite?.pluginVersion || "");
+
+		if (
+			localVersion !== ""
+			&& remoteVersion !== ""
+			&& compareVersions(remoteVersion, localVersion) >= 0
+		) {
+			updateRemoteUpdateControls();
+			return;
+		}
+
+		if (attempt >= maxAttempts) {
+			updateRemoteUpdateControls();
+			return;
+		}
+
+		window.setTimeout(async () => {
+			try {
+				await performConnectionTest();
+			} catch (error) {
+				// Keep retrying briefly in case the destination is still reloading the plugin.
+			}
+
+			refreshRemoteVersionUntilCurrent(attempt + 1);
+		}, attempt === 0 ? 1500 : 2000);
+	};
+
 	const renderMeta = (container, items) => {
 		if (!container) {
 			return;
@@ -607,9 +637,7 @@
 				renderConnectionResult(data.remoteSite, false);
 				updateConnectionControls();
 				updateRemoteUpdateControls();
-				window.setTimeout(() => {
-					performConnectionTest().catch(() => {});
-				}, 1500);
+				refreshRemoteVersionUntilCurrent();
 			}
 		} catch (error) {
 			renderConnectionResult({ message: error.message }, true);
