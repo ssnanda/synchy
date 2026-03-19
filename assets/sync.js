@@ -1005,7 +1005,12 @@
 				mode: "",
 			});
 		} finally {
-			setBusy(false);
+			if (currentJob?.status === "running") {
+				setBusy(true);
+				window.setTimeout(pollSyncJob, 100);
+			} else {
+				setBusy(false);
+			}
 		}
 	};
 
@@ -1135,7 +1140,12 @@
 				at: new Date().toISOString(),
 			});
 		} finally {
-			setBusy(false);
+			if (currentJob?.status === "running") {
+				setBusy(true);
+				window.setTimeout(pollSyncJob, 100);
+			} else {
+				setBusy(false);
+			}
 		}
 	};
 
