@@ -34,6 +34,7 @@
 	const updateRemoteNote = document.querySelector("[data-synchy-update-remote-note]");
 	const previewBadge = document.querySelector("[data-synchy-sync-preview-badge]");
 	const previewMessage = document.querySelector("[data-synchy-sync-preview-message]");
+	const previewBatchCounter = document.querySelector("[data-synchy-sync-batch-counter]");
 	const previewTreeContainer = document.querySelector("[data-synchy-sync-preview-tree]");
 	const statusBadge = document.querySelector("[data-synchy-sync-status-badge]");
 	const statusSummary = document.querySelector("[data-synchy-sync-status-summary]");
@@ -55,6 +56,7 @@
 		!passwordInput ||
 		!previewBadge ||
 		!previewMessage ||
+		!previewBatchCounter ||
 		!statusBadge ||
 		!statusSummary
 	) {
@@ -188,6 +190,37 @@
 					`<div><span class="synchy-export-meta__label">${escapeHtml(item.label)}</span><strong>${item.html ? item.value : escapeHtml(item.value)}</strong></div>`
 			)
 			.join("");
+	};
+
+	const renderPreviewBatchCounter = (preview) => {
+		if (!previewBatchCounter) {
+			return;
+		}
+
+		const batches = Array.isArray(currentJob?.batches) && currentJob.batches.length > 0
+			? currentJob.batches
+			: Array.isArray(preview?.batches) ? preview.batches : [];
+		const totalBatches = Number(
+			currentJob?.totalBatches
+			|| preview?.totalBatches
+			|| batches.length
+			|| 0
+		);
+
+		if (totalBatches <= 0) {
+			previewBatchCounter.textContent = "";
+			previewBatchCounter.classList.add("is-hidden");
+			return;
+		}
+
+		const completedBatches = Number(
+			currentJob?.completedBatches
+			|| batches.filter((batch) => String(batch?.status || "") === "complete").length
+			|| 0
+		);
+
+		previewBatchCounter.textContent = `${completedBatches.toLocaleString()} / ${totalBatches.toLocaleString()} ${config.strings.batchesComplete || "batches complete"}`;
+		previewBatchCounter.classList.remove("is-hidden");
 	};
 
 	const getFileBucketLabel = (scopeId, path) => {
@@ -626,6 +659,7 @@
 				</div>
 			`;
 			previewTreeContainer.classList.remove("is-hidden");
+			renderPreviewBatchCounter(preview);
 			updateActionButtons();
 			return;
 		}
@@ -653,6 +687,7 @@
 		if (fileGroups.length === 0 && databaseTables.length === 0) {
 			previewTreeContainer.innerHTML = "";
 			previewTreeContainer.classList.add("is-hidden");
+			renderPreviewBatchCounter(preview);
 			updateActionButtons();
 			return;
 		}
@@ -751,6 +786,7 @@
 			` : ""}
 		`;
 		previewTreeContainer.classList.remove("is-hidden");
+		renderPreviewBatchCounter(preview);
 		updateActionButtons();
 	};
 
@@ -763,6 +799,7 @@
 				previewBadge.textContent = "";
 				previewMessage.textContent = config.strings.previewDefault || "Run Preview Changes to load the pending file sections and database tables.";
 			}
+			renderPreviewBatchCounter(null);
 			renderPreviewTree(null);
 			return;
 		}

@@ -3,7 +3,7 @@
  * Plugin Name: Synchy
  * Plugin URI: https://github.com/ssnanda/synchy
  * Description: Starter admin shell for Synchy backup, restore, schedule, and sync tooling.
- * Version: 0.7.51
+ * Version: 0.7.52
  * Update URI: https://github.com/ssnanda/synchy
  * Author: sandman
  */
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-const SYNCHY_VERSION = '0.7.51';
+const SYNCHY_VERSION = '0.7.52';
 const SYNCHY_SLUG = 'synchy';
 const SYNCHY_EXPORT_OPTIONS = 'synchy_export_options';
 const SYNCHY_LAST_EXPORT_OPTION = 'synchy_last_export';
@@ -9050,6 +9050,7 @@ function synchy_render_incremental_site_sync_page(array $current): void
 									<span class="synchy-badge" data-synchy-sync-preview-badge><?php echo esc_html($last_sync_time > 0 ? __('Delta', 'synchy') : __('Baseline', 'synchy')); ?></span>
 								</div>
 								<p class="synchy-field-note" data-synchy-sync-preview-message><?php esc_html_e('Run Preview Changes to see how many files and database rows Synchy will sync before anything is sent.', 'synchy'); ?></p>
+								<p class="synchy-field-note is-hidden" data-synchy-sync-batch-counter></p>
 								<div class="synchy-sync-tree is-hidden" data-synchy-sync-preview-tree></div>
 							</div>
 						</div>
@@ -10264,6 +10265,7 @@ add_action('admin_enqueue_scripts', function (string $hook_suffix): void {
 					'confirmBaseline' => __('Mark the selected scopes as already baselined after a successful manual full restore to the destination site?', 'synchy'),
 					'selectAtLeastOneScope' => __('Select at least one file or database scope first.', 'synchy'),
 					'batches' => __('Batches', 'synchy'),
+					'batchesComplete' => __('batches complete', 'synchy'),
 					'currentBatch' => __('Current batch', 'synchy'),
 					'pausePending' => __('Pause requested', 'synchy'),
 					'updateAvailable' => __('Destination update available:', 'synchy'),
